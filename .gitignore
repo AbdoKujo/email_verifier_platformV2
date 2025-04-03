@@ -1,0 +1,20 @@
+# Ignore everything
+*
+*/**
+
+# Don't ignore these folders
+!models/
+!models/**
+!api/
+!api/**
+
+# Don't ignore specific files
+!main.*
+!terminalController.*
+
+# Don't ignore HTML and JS files
+!*.html
+!*.js
+
+# Don't ignore .gitignore
+!.gitignore
