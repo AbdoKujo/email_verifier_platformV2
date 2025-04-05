@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory
 from flask_cors import CORS
 import os
 import sys
@@ -26,6 +26,11 @@ results_service = ResultsService()
 statistics_service = StatisticsService()
 settings_service = SettingsService()
 
+# Serve HTML Tester
+@app.route('/')
+def index():
+    return send_from_directory('static', 'index.html')
+
 # API Routes
 
 # Verification endpoints
@@ -45,7 +50,7 @@ def verify_email():
 @app.route('/api/verify/batch', methods=['POST'])
 def verify_batch():
     """
-    Verify a batch of email addresses using terminalController.
+    Verify a batch of email addresses.
     This endpoint streams results as they become available.
     """
     data = request.get_json()
@@ -153,5 +158,7 @@ def update_settings():
         return jsonify(result), 400
 
 if __name__ == '__main__':
+    # Create static directory if it doesn't exist
+    os.makedirs(os.path.join(os.path.dirname(__file__), 'static'), exist_ok=True)
     app.run(debug=True, host='0.0.0.0', port=5000)
 

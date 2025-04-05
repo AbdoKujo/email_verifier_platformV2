@@ -279,8 +279,8 @@ class SeleniumModel:
                 options.add_argument("--window-size=1920,1080")
                 
                 # Add headless option if enabled
-                if self.settings_model.is_enabled("browser_headless"):
-                    options.add_argument("--headless=new")
+                #if self.settings_model.is_enabled("browser_headless"):
+                #    options.add_argument("--headless=new")
                 
                 # Add proxy if enabled
                 if self.settings_model.is_enabled("proxy_enabled"):
@@ -330,8 +330,8 @@ class SeleniumModel:
             edge_normal_options.add_experimental_option("prefs", prefs)
             
             # Add headless option if enabled
-            if self.settings_model.is_enabled("browser_headless"):
-                edge_normal_options.add_argument("--headless=new")
+            #if self.settings_model.is_enabled("browser_headless"):
+            #    edge_normal_options.add_argument("--headless=new")
             
             # Add proxy if enabled
             if self.settings_model.is_enabled("proxy_enabled"):

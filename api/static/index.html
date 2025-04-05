@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Verifier API Tester</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        h1, h2, h3 {
+            color: #333;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }
+        .endpoint {
+            border-left: 4px solid #0275d8;
+            margin-bottom: 30px;
+            padding: 0 20px;
+            background-color: #fff;
+            border-radius: 0 4px 4px 0;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
+        }
+        .endpoint h3 {
+            margin-top: 20px;
+        }
+        .method {
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        .url {
+            color: #666;
+            font-family: monospace;
+            padding: 2px 5px;
+            background-color: #f0f0f0;
+            border-radius: 3px;
+        }
+        .request-body {
+            margin-top: 10px;
+        }
+        textarea {
+            width: 100%;
+            min-height: 120px;
+            font-family: monospace;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            resize: vertical;
+        }
+        button {
+            background-color: #0275d8;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            margin-top: 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background-color: #025aa5;
+        }
+        .response {
+            margin-top: 20px;
+            border-top: 1px solid #eee;
+            padding-top: 10px;
+        }
+        .response-header {
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .response-body {
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            white-space: pre-wrap;
+            border: 1px solid #ddd;
+        }
+        .api-url-container {
+            margin-bottom: 20px;
+        }
+        .api-url {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        .status-success {
+            color: #28a745;
+        }
+        .status-error {
+            color: #dc3545;
+        }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            margin-left: 10px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #0275d8;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .stream-result {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .stream-valid {
+            color: #28a745;
+        }
+        .stream-invalid {
+            color: #dc3545;
+        }
+        .stream-risky {
+            color: #ffc107;
+        }
+        .stream-custom {
+            color: #6f42c1;
+        }
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #ddd;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            border-bottom: none;
+        }
+        .tab.active {
+            background-color: #fff;
+            border-color: #ddd;
+            border-radius: 4px 4px 0 0;
+            margin-bottom: -1px;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <h1>Email Verifier API Tester</h1>
+    
+    <div class="api-url-container">
+        <input type="text" id="api-url" class="api-url" value="http://localhost:5000" placeholder="API URL (e.g., http://localhost:5000)">
+    </div>
+    
+    <div class="tabs">
+        <div class="tab active" data-tab="verification">Verification</div>
+        <div class="tab" data-tab="results">Results</div>
+        <div class="tab" data-tab="statistics">Statistics</div>
+        <div class="tab" data-tab="settings">Settings</div>
+    </div>
+    
+    <div id="verification-tab" class="tab-content active">
+        <h2>Verification Endpoints</h2>
+        
+        <div class="endpoint">
+            <h3>Verify a Single Email</h3>
+            <p><span class="method">POST:</span><span class="url">/api/verify/email</span></p>
+            <div class="request-body">
+                <p>Request Body:</p>
+                <textarea id="single-email-body">{
+  "email": "example@example.com"
+}</textarea>
+            </div>
+            <button id="test-single-email">Test Endpoint</button>
+            <div class="response" id="single-email-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="single-email-response-body"></div>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <h3>Verify Batch of Emails</h3>
+            <p><span class="method">POST:</span><span class="url">/api/verify/batch</span></p>
+            <div class="request-body">
+                <p>Request Body:</p>
+                <textarea id="batch-emails-body">{
+  "emails": [
+    "example1@example.com",
+    "example2@example.com",
+    "example3@example.com"
+  ]
+}</textarea>
+            </div>
+            <button id="test-batch-emails">Test Endpoint</button>
+            <div class="response" id="batch-emails-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="batch-emails-response-body"></div>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <h3>Get Job Status</h3>
+            <p><span class="method">GET:</span><span class="url">/api/verify/status/{job_id}</span></p>
+            <div class="request-body">
+                <p>Job ID:</p>
+                <input type="text" id="job-id" style="width: 100%; padding: 8px; margin-bottom: 10px;" placeholder="Enter job ID">
+            </div>
+            <button id="test-job-status">Test Endpoint</button>
+            <div class="response" id="job-status-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="job-status-response-body"></div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="results-tab" class="tab-content">
+        <h2>Results Endpoints</h2>
+        
+        <div class="endpoint">
+            <h3>Get All Results</h3>
+            <p><span class="method">GET:</span><span class="url">/api/results</span></p>
+            <button id="test-all-results">Test Endpoint</button>
+            <div class="response" id="all-results-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="all-results-response-body"></div>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <h3>Get Job Results</h3>
+            <p><span class="method">GET:</span><span class="url">/api/results/{job_id}</span></p>
+            <div class="request-body">
+                <p>Job ID:</p>
+                <input type="text" id="results-job-id" style="width: 100%; padding: 8px; margin-bottom: 10px;" placeholder="Enter job ID">
+            </div>
+            <button id="test-job-results">Test Endpoint</button>
+            <div class="response" id="job-results-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="job-results-response-body"></div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="statistics-tab" class="tab-content">
+        <h2>Statistics Endpoints</h2>
+        
+        <div class="endpoint">
+            <h3>Get Global Statistics</h3>
+            <p><span class="method">GET:</span><span class="url">/api/statistics</span></p>
+            <button id="test-statistics">Test Endpoint</button>
+            <div class="response" id="statistics-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="statistics-response-body"></div>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <h3>Get Email History</h3>
+            <p><span class="method">GET:</span><span class="url">/api/statistics/history/email?email={email}</span></p>
+            <div class="request-body">
+                <p>Email:</p>
+                <input type="text" id="history-email" style="width: 100%; padding: 8px; margin-bottom: 10px;" placeholder="Enter email address">
+            </div>
+            <button id="test-email-history">Test Endpoint</button>
+            <div class="response" id="email-history-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="email-history-response-body"></div>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <h3>Get Verification History</h3>
+            <p><span class="method">GET:</span><span class="url">/api/statistics/history?category={category}</span></p>
+            <div class="request-body">
+                <p>Category:</p>
+                <select id="history-category" style="width: 100%; padding: 8px; margin-bottom: 10px;">
+                    <option value="valid">Valid</option>
+                    <option value="invalid">Invalid</option>
+                    <option value="risky">Risky</option>
+                    <option value="custom">Custom</option>
+                </select>
+            </div>
+            <button id="test-category-history">Test Endpoint</button>
+            <div class="response" id="category-history-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="category-history-response-body"></div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="settings-tab" class="tab-content">
+        <h2>Settings Endpoints</h2>
+        
+        <div class="endpoint">
+            <h3>Get Settings</h3>
+            <p><span class="method">GET:</span><span class="url">/api/settings</span></p>
+            <button id="test-get-settings">Test Endpoint</button>
+            <div class="response" id="get-settings-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="get-settings-response-body"></div>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <h3>Update Settings</h3>
+            <p><span class="method">PUT:</span><span class="url">/api/settings</span></p>
+            <div class="request-body">
+                <p>Request Body:</p>
+                <textarea id="update-settings-body">{
+  "smtp_timeout": 30,
+  "mx_timeout": 10,
+  "skip_disposable_check": false,
+  "skip_catch_all_check": false,
+  "verify_smtp": true
+}</textarea>
+            </div>
+            <button id="test-update-settings">Test Endpoint</button>
+            <div class="response" id="update-settings-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="update-settings-response-body"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Tab navigation
+            const tabs = document.querySelectorAll('.tab');
+            tabs.forEach(tab => {
+                tab.addEventListener('click', () => {
+                    // Remove active class from all tabs and content
+                    tabs.forEach(t => t.classList.remove('active'));
+                    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                    
+                    // Add active class to clicked tab and corresponding content
+                    tab.classList.add('active');
+                    document.getElementById(`${tab.dataset.tab}-tab`).classList.add('active');
+                });
+            });
+            
+            // Helper function to format JSON
+            function formatJSON(json) {
+                try {
+                    return JSON.stringify(JSON.parse(json), null, 2);
+                } catch (e) {
+                    return json;
+                }
+            }
+            
+            // Helper function to show response
+            function showResponse(responseElem, responseBodyElem, data, isStream = false) {
+                responseElem.style.display = 'block';
+                
+                if (isStream) {
+                    responseBodyElem.innerHTML = '';
+                    return;
+                }
+                
+                if (typeof data === 'object') {
+                    responseBodyElem.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    responseBodyElem.textContent = data;
+                }
+            }
+            
+            // Helper function to add a loading indicator
+            function addLoadingIndicator(button) {
+                button.disabled = true;
+                const loading = document.createElement('span');
+                loading.className = 'loading';
+                button.appendChild(loading);
+                return loading;
+            }
+            
+            // Helper function to remove loading indicator
+            function removeLoadingIndicator(button, loading) {
+                button.disabled = false;
+                if (loading) {
+                    button.removeChild(loading);
+                }
+            }
+            
+            // Helper function to get the API base URL
+            function getApiUrl() {
+                return document.getElementById('api-url').value.trim();
+            }
+            
+            // Verify a single email
+            document.getElementById('test-single-email').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('single-email-response');
+                const responseBodyElem = document.getElementById('single-email-response-body');
+                
+                try {
+                    const body = document.getElementById('single-email-body').value;
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/verify/email`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Verify batch of emails
+            document.getElementById('test-batch-emails').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('batch-emails-response');
+                const responseBodyElem = document.getElementById('batch-emails-response-body');
+                
+                // Clear the response body and show it
+                showResponse(responseElem, responseBodyElem, '', true);
+                
+                try {
+                    const body = document.getElementById('batch-emails-body').value;
+                    const apiUrl = getApiUrl();
+                    
+                    // Create a fetch request with streaming response
+                    const response = await fetch(`${apiUrl}/api/verify/batch`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body
+                    });
+                    
+                    // Parse the response body as a stream
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    
+                    // Process the stream
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        
+                        // Decode the chunk
+                        const chunk = decoder.decode(value, { stream: true });
+                        
+                        // Process each line separately
+                        const lines = chunk.split('\n');
+                        for (const line of lines) {
+                            if (line.trim()) {
+                                try {
+                                    const result = JSON.parse(line);
+                                    
+                                    // Check if this is a status update or a result
+                                    if (result.email) {
+                                        // This is a result for a specific email
+                                        const status = result.status.toLowerCase();
+                                        const statusClass = `stream-${status}`;
+                                        
+                                        // Create a div for this result
+                                        const resultDiv = document.createElement('div');
+                                        resultDiv.className = `stream-result ${statusClass}`;
+                                        resultDiv.innerHTML = `📧 ${result.email}: <strong>${status.toUpperCase()}</strong> (${result.provider})`;
+                                        
+                                        // Add to the response body
+                                        responseBodyElem.appendChild(resultDiv);
+                                    } else {
+                                        // This is a status update
+                                        const statusDiv = document.createElement('div');
+                                        statusDiv.className = 'stream-result';
+                                        statusDiv.innerHTML = `<strong>Status:</strong> ${result.status} - ${result.message || ''}`;
+                                        
+                                        // Add to the response body
+                                        responseBodyElem.appendChild(statusDiv);
+                                        
+                                        // If this is a completed status, update the job ID field
+                                        if (result.job_id && (result.status === 'completed' || result.status === 'started')) {
+                                            document.getElementById('job-id').value = result.job_id;
+                                            document.getElementById('results-job-id').value = result.job_id;
+                                        }
+                                    }
+                                    
+                                    // Scroll to the bottom
+                                    responseBodyElem.scrollTop = responseBodyElem.scrollHeight;
+                                } catch (e) {
+                                    console.error('Error parsing JSON:', e);
+                                }
+                            }
+                        }
+                    }
+                } catch (error) {
+                    // Add error message to the response body
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'stream-result status-error';
+                    errorDiv.textContent = `Error: ${error.message}`;
+                    responseBodyElem.appendChild(errorDiv);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+
+            // Get job status
+            document.getElementById('test-job-status').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('job-status-response');
+                const responseBodyElem = document.getElementById('job-status-response-body');
+                
+                try {
+                    const jobId = document.getElementById('job-id').value;
+                    if (!jobId) {
+                        throw new Error('Job ID is required');
+                    }
+                    
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/verify/status/${jobId}`, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Get all results
+            document.getElementById('test-all-results').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('all-results-response');
+                const responseBodyElem = document.getElementById('all-results-response-body');
+                
+                try {
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/results`, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Get job results
+            document.getElementById('test-job-results').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('job-results-response');
+                const responseBodyElem = document.getElementById('job-results-response-body');
+                
+                try {
+                    const jobId = document.getElementById('results-job-id').value;
+                    if (!jobId) {
+                        throw new Error('Job ID is required');
+                    }
+                    
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/results/${jobId}`, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Get global statistics
+            document.getElementById('test-statistics').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('statistics-response');
+                const responseBodyElem = document.getElementById('statistics-response-body');
+                
+                try {
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/statistics`, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Get email history
+            document.getElementById('test-email-history').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('email-history-response');
+                const responseBodyElem = document.getElementById('email-history-response-body');
+                
+                try {
+                    const email = document.getElementById('history-email').value;
+                    if (!email) {
+                        throw new Error('Email is required');
+                    }
+                    
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/statistics/history/email?email=${encodeURIComponent(email)}`, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Get verification history
+            document.getElementById('test-category-history').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('category-history-response');
+                const responseBodyElem = document.getElementById('category-history-response-body');
+                
+                try {
+                    const category = document.getElementById('history-category').value;
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/statistics/history?category=${encodeURIComponent(category)}`, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Get settings
+            document.getElementById('test-get-settings').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('get-settings-response');
+                const responseBodyElem = document.getElementById('get-settings-response-body');
+                
+                try {
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/settings`, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                    
+                    // Update the settings body with the current settings
+                    document.getElementById('update-settings-body').value = JSON.stringify(data, null, 2);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Update settings
+            document.getElementById('test-update-settings').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('update-settings-response');
+                const responseBodyElem = document.getElementById('update-settings-response-body');
+                
+                try {
+                    const body = document.getElementById('update-settings-body').value;
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/settings`, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
+

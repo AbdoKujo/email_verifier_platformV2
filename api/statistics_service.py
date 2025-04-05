@@ -119,3 +119,4 @@ class StatisticsService:
         except Exception as e:
             logger.error(f"Error getting history for category {category}: {e}")
             return None
+

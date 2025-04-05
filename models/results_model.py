@@ -38,10 +38,10 @@ class ResultsModel:
         
         # Results files with all details
         self.results_files = {
-            VALID: os.path.join(self.results_dir, "Valid_Results.csv"),
-            INVALID: os.path.join(self.results_dir, "Invalid_Results.csv"),
-            RISKY: os.path.join(self.results_dir, "Risky_Results.csv"),
-            CUSTOM: os.path.join(self.results_dir, "Custom_Results.csv"),
+            VALID: os.path.join(self.results_dir, "valid.csv"),
+            INVALID: os.path.join(self.results_dir, "invalid.csv"),
+            RISKY: os.path.join(self.results_dir, "risky.csv"),
+            CUSTOM: os.path.join(self.results_dir, "custom.csv"),
         }
         
         # Create history directory for tracking verification history
