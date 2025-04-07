@@ -15,6 +15,7 @@ from email.mime.multipart import MIMEMultipart
 from email.header import decode_header
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple, Set
+import json
 
 from models.settings_model import SettingsModel
 from models.common import EmailVerificationResult, VALID, INVALID, RISKY, CUSTOM
@@ -41,9 +42,7 @@ class BounceModel:
             logger.warning("No SMTP accounts configured for bounce verification")
         
         # Create required directories
-        self.batches_dir = os.path.join("./data", "bounce_batches")
-        self.results_dir = os.path.join("./data", "bounce_results")
-        os.makedirs(self.batches_dir, exist_ok=True)
+        self.results_dir = os.path.join("./results", "bounce_results")
         os.makedirs(self.results_dir, exist_ok=True)
         
         # Lock for thread safety
@@ -54,35 +53,6 @@ class BounceModel:
         
         # Tracking for sent emails
         self.sent_emails: Dict[str, Dict[str, Any]] = {}
-        
-        # Load any existing batches
-        self._load_existing_batches()
-    
-    def _load_existing_batches(self) -> None:
-        """Load existing batch information from files."""
-        try:
-            for filename in os.listdir(self.batches_dir):
-                if filename.endswith(".csv"):
-                    batch_id = os.path.splitext(filename)[0]
-                    batch_file = os.path.join(self.batches_dir, filename)
-                    
-                    with open(batch_file, 'r', newline='', encoding='utf-8') as f:
-                        reader = csv.reader(f)
-                        header = next(reader)  # Skip header
-                        
-                        for row in reader:
-                            if len(row) >= 3:
-                                email = row[0]
-                                status = row[1]
-                                timestamp = row[2]
-                                
-                                self.sent_emails[email] = {
-                                    "batch_id": batch_id,
-                                    "status": status,
-                                    "timestamp": timestamp
-                                }
-        except Exception as e:
-            logger.error(f"Error loading existing batches: {e}")
     
     def verify_email_bounce(self, email: str) -> EmailVerificationResult:
         """
@@ -112,76 +82,23 @@ class BounceModel:
                 logger.info(f"Using cached bounce verification result for {email}")
                 return self.result_cache[email]
         
-        # Check if email is already in a batch
-        if email in self.sent_emails:
-            batch_info = self.sent_emails[email]
-            batch_id = batch_info["batch_id"]
-            status = batch_info["status"]
-            
-            # If the email has already been verified, return the result
-            if status in [VALID, INVALID]:
-                logger.info(f"Email {email} already verified as {status} in batch {batch_id}")
-                result = EmailVerificationResult(
-                    email=email,
-                    category=status,
-                    reason=f"Email previously verified as {status} in batch {batch_id}",
-                    provider="bounce"
-                )
-                
-                with self.lock:
-                    self.result_cache[email] = result
-                
-                return result
-            
-            # If the email is pending, check for bounces
-            if status == PENDING:
-                logger.info(f"Email {email} is pending in batch {batch_id}, checking for bounces")
-                invalid_emails, valid_emails = self._check_inbox_for_bounces(batch_id)
-                
-                # Update the batch file with results
-                self._save_results(invalid_emails, valid_emails, batch_id)
-                
-                # Return the result
-                if email in invalid_emails:
-                    result = EmailVerificationResult(
-                        email=email,
-                        category=INVALID,
-                        reason="Email bounced back as invalid",
-                        provider="bounce"
-                    )
-                elif email in valid_emails:
-                    result = EmailVerificationResult(
-                        email=email,
-                        category=VALID,
-                        reason="Email delivered successfully",
-                        provider="bounce"
-                    )
-                else:
-                    result = EmailVerificationResult(
-                        email=email,
-                        category=RISKY,
-                        reason="No bounce received, but delivery status uncertain",
-                        provider="bounce"
-                    )
-                
-                with self.lock:
-                    self.result_cache[email] = result
-                
-                return result
-        
         # Generate a unique batch ID for this verification
         batch_id = f"bounce_{int(time.time())}_{uuid.uuid4().hex[:8]}"
         
-        # Create a batch file
-        self._create_batch_file(batch_id, [email])
+        # Create the results directory
+        results_dir = os.path.join(self.results_dir, batch_id)
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # Create email_b.csv file
+        self._create_email_file(batch_id, [email])
         
         # Send the email
         sent = self._send_verification_email(email, batch_id)
         if not sent:
             logger.error(f"Failed to send verification email to {email}")
             
-            # Update the batch file
-            self._update_batch_status(email, RISKY, batch_id)
+            # Update the email status
+            self._update_email_status(email, RISKY, batch_id)
             
             result = EmailVerificationResult(
                 email=email,
@@ -195,52 +112,26 @@ class BounceModel:
             
             return result
         
-        # Wait for potential bounce-backs
-        wait_time = self.settings_model.get_int("bounce_wait_time", 60)
-        logger.info(f"Waiting {wait_time} seconds for potential bounce-backs...")
-        time.sleep(wait_time)
-        
-        # Check for bounce-backs
-        invalid_emails, valid_emails = self._check_inbox_for_bounces(batch_id)
-        
-        # Update the batch file with results
-        self._save_results(invalid_emails, valid_emails, batch_id)
-        
-        # Determine the result
-        if email in invalid_emails:
-            result = EmailVerificationResult(
-                email=email,
-                category=INVALID,
-                reason="Email bounced back as invalid",
-                provider="bounce"
-            )
-        elif email in valid_emails:
-            result = EmailVerificationResult(
-                email=email,
-                category=VALID,
-                reason="Email delivered successfully",
-                provider="bounce"
-            )
-        else:
-            # No bounce received, assume valid but mark as risky
-            result = EmailVerificationResult(
-                email=email,
-                category=RISKY,
-                reason="No bounce received, but delivery status uncertain",
-                provider="bounce"
-            )
+        # Don't wait for bounce backs, just return a pending result
+        result = EmailVerificationResult(
+            email=email,
+            category=RISKY,
+            reason="Verification email sent, check bounce backs later",
+            provider="bounce"
+        )
         
         with self.lock:
             self.result_cache[email] = result
         
         return result
     
-    def batch_verify_emails(self, emails: List[str]) -> Dict[str, EmailVerificationResult]:
+    def batch_verify_emails(self, emails: List[str], existing_batch_id: str = None) -> Dict[str, EmailVerificationResult]:
         """
         Verify multiple emails using the bounce method.
         
         Args:
             emails: List of email addresses to verify
+            existing_batch_id: Optional existing batch ID to use
             
         Returns:
             Dict[str, EmailVerificationResult]: Dictionary of verification results
@@ -257,11 +148,23 @@ class BounceModel:
                 provider="bounce"
             ) for email in emails}
         
-        # Generate a unique batch ID for this verification
-        batch_id = f"bounce_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        # Determine batch ID and directory
+        if existing_batch_id:
+            batch_id = existing_batch_id
+            results_dir = os.path.join("./results", batch_id)
+        else:
+            # Generate a unique batch ID for this verification
+            batch_id = f"bounce_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+            results_dir = os.path.join(self.results_dir, batch_id)
         
-        # Create a batch file
-        self._create_batch_file(batch_id, emails)
+        # Create the results directory if it doesn't exist
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # Create email_b.csv file
+        self._create_email_file(batch_id, emails)
+        
+        # Create initial status_b.json file
+        self._create_status_file(batch_id, emails)
         
         # Send emails
         sent_count = 0
@@ -269,47 +172,22 @@ class BounceModel:
             sent = self._send_verification_email(email, batch_id)
             if sent:
                 sent_count += 1
+                # Update email status
+                self._update_email_status(email, PENDING, batch_id)
                 # Add a small delay between sends to avoid rate limiting
                 time.sleep(random.uniform(1, 3))
         
         logger.info(f"Sent {sent_count} out of {len(emails)} verification emails for batch {batch_id}")
         
-        # Wait for potential bounce-backs
-        wait_time = self.settings_model.get_int("bounce_wait_time", 60)
-        logger.info(f"Waiting {wait_time} seconds for potential bounce-backs...")
-        time.sleep(wait_time)
-        
-        # Check for bounce-backs
-        invalid_emails, valid_emails = self._check_inbox_for_bounces(batch_id)
-        
-        # Update the batch file with results
-        self._save_results(invalid_emails, valid_emails, batch_id)
-        
         # Prepare results
         results = {}
         for email in emails:
-            if email in invalid_emails:
-                results[email] = EmailVerificationResult(
-                    email=email,
-                    category=INVALID,
-                    reason="Email bounced back as invalid",
-                    provider="bounce"
-                )
-            elif email in valid_emails:
-                results[email] = EmailVerificationResult(
-                    email=email,
-                    category=VALID,
-                    reason="Email delivered successfully",
-                    provider="bounce"
-                )
-            else:
-                # No bounce received, assume valid but mark as risky
-                results[email] = EmailVerificationResult(
-                    email=email,
-                    category=RISKY,
-                    reason="No bounce received, but delivery status uncertain",
-                    provider="bounce"
-                )
+            results[email] = EmailVerificationResult(
+                email=email,
+                category=RISKY,
+                reason="Verification email sent, check bounce backs later",
+                provider="bounce"
+            )
             
             # Update cache
             with self.lock:
@@ -317,20 +195,31 @@ class BounceModel:
         
         return results
     
-    def _create_batch_file(self, batch_id: str, emails: List[str]) -> None:
+    def _create_email_file(self, batch_id: str, emails: List[str]) -> None:
         """
-        Create a batch file for tracking verification status.
+        Create an email_b.csv file for tracking emails.
         
         Args:
             batch_id: The batch ID
             emails: List of email addresses in the batch
         """
-        batch_file = os.path.join(self.batches_dir, f"{batch_id}.csv")
+        # Determine the correct file path
+        if batch_id.startswith("batch_"):
+            # Existing batch ID
+            file_path = os.path.join("./results", batch_id, "email_b.csv")
+        else:
+            # New bounce verification
+            file_path = os.path.join(self.results_dir, batch_id, "email_b.csv")
         
-        with open(batch_file, 'w', newline='', encoding='utf-8') as f:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        with open(file_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(["email", "status", "timestamp"])
+            # First line contains the batch ID
+            writer.writerow([batch_id])
             
+            # Subsequent lines contain email and status
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for email in emails:
                 writer.writerow([email, PENDING, timestamp])
@@ -342,27 +231,77 @@ class BounceModel:
                     "timestamp": timestamp
                 }
     
-    def _update_batch_status(self, email: str, status: str, batch_id: str) -> None:
+    def _create_status_file(self, batch_id: str, emails: List[str]) -> None:
         """
-        Update the status of an email in a batch file.
+        Create a status_b.json file for tracking verification status.
+        
+        Args:
+            batch_id: The batch ID
+            emails: List of email addresses in the batch
+        """
+        # Determine the correct file path
+        if batch_id.startswith("batch_"):
+            # Existing batch ID
+            file_path = os.path.join("./results", batch_id, "status_b.json")
+        else:
+            # New bounce verification
+            file_path = os.path.join(self.results_dir, batch_id, "status_b.json")
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        # Prepare status data
+        status_data = {
+            "batch_id": batch_id,
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "sending",
+            "total_emails": len(emails),
+            "valid": 0,
+            "invalid": 0,
+            "risky": len(emails),
+            "custom": 0,
+            "pending": len(emails),
+            "checking_attempts": 0,
+            "last_checked": "",
+            "first_checked": "",
+            "valid_list": [],
+            "invalid_list": [],
+            "risky_list": emails.copy(),
+            "custom_list": []
+        }
+        
+        # Save status data
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(status_data, f, indent=4)
+    
+    def _update_email_status(self, email: str, status: str, batch_id: str) -> None:
+        """
+        Update the status of an email in the email_b.csv file.
         
         Args:
             email: The email address
             status: The new status
             batch_id: The batch ID
         """
-        batch_file = os.path.join(self.batches_dir, f"{batch_id}.csv")
+        # Determine the correct file path
+        if batch_id.startswith("batch_"):
+            # Existing batch ID
+            file_path = os.path.join("./results", batch_id, "email_b.csv")
+        else:
+            # New bounce verification
+            file_path = os.path.join(self.results_dir, batch_id, "email_b.csv")
         
-        if not os.path.exists(batch_file):
-            logger.error(f"Batch file {batch_file} not found")
+        if not os.path.exists(file_path):
+            logger.error(f"Email file {file_path} not found")
             return
         
-        # Read the current batch file
+        # Read the current email file
         rows = []
-        with open(batch_file, 'r', newline='', encoding='utf-8') as f:
+        with open(file_path, 'r', newline='', encoding='utf-8') as f:
             reader = csv.reader(f)
-            header = next(reader)
-            rows.append(header)
+            # First row is the batch ID
+            batch_id_row = next(reader)
+            rows.append(batch_id_row)
             
             for row in reader:
                 if len(row) >= 3 and row[0] == email:
@@ -372,8 +311,8 @@ class BounceModel:
                 
                 rows.append(row)
         
-        # Write the updated batch file
-        with open(batch_file, 'w', newline='', encoding='utf-8') as f:
+        # Write the updated email file
+        with open(file_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             for row in rows:
                 writer.writerow(row)
@@ -402,19 +341,14 @@ class BounceModel:
             msg = MIMEMultipart()
             msg['From'] = account.get('email', '')
             msg['To'] = recipient_email
-            msg['Subject'] = f"Email Verification - {batch_id}"
+            msg['Subject'] = ""  # Empty subject as requested
             
             # Add batch ID to headers for tracking
             msg['X-Batch-ID'] = batch_id
             msg['X-Verification-Email'] = recipient_email
             
-            # Create message body
-            body = f"""
-            This is an automated email verification message.
-            Please ignore this message.
-            
-            Verification ID: {batch_id}
-            """
+            # Create minimal message body
+            body = ""  # Very fast/minimal body as requested
             msg.attach(MIMEText(body, 'plain'))
             
             # Connect to SMTP server
@@ -457,7 +391,17 @@ class BounceModel:
             sender: The sender email address
         """
         try:
-            log_file = os.path.join("./data", "sent_emails.log")
+            # Determine the correct log file location based on batch_id
+            if batch_id.startswith("batch_"):
+                # Existing batch ID
+                log_dir = os.path.join("./results", batch_id)
+            else:
+                # New bounce verification
+                log_dir = os.path.join(self.results_dir, batch_id)
+            
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, "sent_emails.log")
+            
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             with open(log_file, 'a', encoding='utf-8') as f:
@@ -477,6 +421,9 @@ class BounceModel:
         """
         invalid_emails = []
         
+        # Get list of all emails in the batch
+        all_emails = self._get_emails_from_batch(batch_id)
+        
         for account in self.smtp_accounts:
             try:
                 # Connect to IMAP server
@@ -490,116 +437,61 @@ class BounceModel:
                 mail.login(account.get('email', ''), account.get('password', ''))
                 mail.select('inbox')
                 
-                # Search for bounce emails
+                # Search for bounce emails for each email in the batch
                 account_invalid_emails = []
                 
-                # Search for emails with the batch ID in headers
-                status, messages = mail.search(None, f'(HEADER X-Batch-ID "{batch_id}")')
-                
-                if status == 'OK' and messages[0]:
-                    for msg_id in messages[0].split():
-                        status, msg_data = mail.fetch(msg_id, '(RFC822)')
-                        
-                        if status != 'OK':
-                            continue
-                        
-                        raw_email = msg_data[0][1]
-                        msg = email.message_from_bytes(raw_email)
-                        
-                        # Check if this is a delivery status notification
-                        if 'delivery status notification' in msg.get('Subject', '').lower() or \
-                           'undeliverable' in msg.get('Subject', '').lower() or \
-                           'failed delivery' in msg.get('Subject', '').lower() or \
-                           'mail delivery failed' in msg.get('Subject', '').lower() or \
-                           'returned mail' in msg.get('Subject', '').lower() or \
-                           'delivery failure' in msg.get('Subject', '').lower() or \
-                           'delivery status' in msg.get('Subject', '').lower() or \
-                           'failure notice' in msg.get('Subject', '').lower() or \
-                           'mail delivery notification' in msg.get('Subject', '').lower():
-                            
-                            # Extract the body
-                            body = ""
-                            if msg.is_multipart():
-                                for part in msg.walk():
-                                    content_type = part.get_content_type()
-                                    content_disposition = str(part.get("Content-Disposition"))
-                                    
-                                    if "attachment" not in content_disposition and content_type in ["text/plain", "text/html"]:
-                                        try:
-                                            body_part = part.get_payload(decode=True).decode()
-                                            body += body_part
-                                        except:
-                                            pass
-                            else:
-                                try:
-                                    body = msg.get_payload(decode=True).decode()
-                                except:
-                                    pass
-                            
-                            # Extract invalid email from the body
-                            invalid_email = self._extract_invalid_email_from_bounce(body, str(raw_email))
-                            
-                            if invalid_email:
-                                account_invalid_emails.append(invalid_email)
-                            
-                            # Mark as read
-                            mail.store(msg_id, '+FLAGS', '\\Seen')
-                
-                # Also search for bounce emails in the subject
-                search_terms = [
-                    '(SUBJECT "delivery status notification")',
-                    '(SUBJECT "undeliverable")',
-                    '(SUBJECT "failed delivery")',
-                    '(SUBJECT "mail delivery failed")',
-                    '(SUBJECT "returned mail")',
-                    '(SUBJECT "delivery failure")',
-                    '(SUBJECT "delivery status")',
-                    '(SUBJECT "failure notice")',
-                    '(SUBJECT "mail delivery notification")'
-                ]
-                
-                for search_term in search_terms:
-                    status, messages = mail.search(None, search_term)
+                for email_to_check in all_emails:
+                    # Search directly by email address in the inbox
+                    search_terms = [
+                        f'(HEADER FROM "MAILER-DAEMON")',
+                        f'(HEADER FROM "Mail Delivery System")',
+                        f'(HEADER FROM "postmaster")',
+                        f'(HEADER SUBJECT "Undeliverable")',
+                        f'(HEADER SUBJECT "Delivery Status Notification")',
+                        f'(HEADER SUBJECT "Mail Delivery Failure")',
+                        f'(HEADER SUBJECT "Returned mail")',
+                        f'(HEADER SUBJECT "Delivery Failure")',
+                        f'(HEADER SUBJECT "Failure Notice")'
+                    ]
                     
-                    if status == 'OK' and messages[0]:
-                        for msg_id in messages[0].split():
-                            status, msg_data = mail.fetch(msg_id, '(RFC822)')
-                            
-                            if status != 'OK':
-                                continue
-                            
-                            raw_email = msg_data[0][1]
-                            msg = email.message_from_bytes(raw_email)
-                            
-                            # Extract the body
-                            body = ""
-                            if msg.is_multipart():
-                                for part in msg.walk():
-                                    content_type = part.get_content_type()
-                                    content_disposition = str(part.get("Content-Disposition"))
-                                    
-                                    if "attachment" not in content_disposition and content_type in ["text/plain", "text/html"]:
-                                        try:
-                                            body_part = part.get_payload(decode=True).decode()
-                                            body += body_part
-                                        except:
-                                            pass
-                            else:
-                                try:
-                                    body = msg.get_payload(decode=True).decode()
-                                except:
-                                    pass
-                            
-                            # Check if the body contains the batch ID
-                            if batch_id in body:
-                                # Extract invalid email from the body
-                                invalid_email = self._extract_invalid_email_from_bounce(body, str(raw_email))
+                    for search_term in search_terms:
+                        status, messages = mail.search(None, search_term)
+                        
+                        if status == 'OK' and messages[0]:
+                            for msg_id in messages[0].split():
+                                status, msg_data = mail.fetch(msg_id, '(RFC822)')
                                 
-                                if invalid_email:
-                                    account_invalid_emails.append(invalid_email)
+                                if status != 'OK':
+                                    continue
                                 
-                                # Mark as read
-                                mail.store(msg_id, '+FLAGS', '\\Seen')
+                                raw_email = msg_data[0][1]
+                                msg = email.message_from_bytes(raw_email)
+                                
+                                # Extract the body
+                                body = ""
+                                if msg.is_multipart():
+                                    for part in msg.walk():
+                                        content_type = part.get_content_type()
+                                        content_disposition = str(part.get("Content-Disposition"))
+                                        
+                                        if "attachment" not in content_disposition and content_type in ["text/plain", "text/html"]:
+                                            try:
+                                                body_part = part.get_payload(decode=True).decode()
+                                                body += body_part
+                                            except:
+                                                pass
+                                else:
+                                    try:
+                                        body = msg.get_payload(decode=True).decode()
+                                    except:
+                                        pass
+                                
+                                # Check if the body contains the email we're looking for
+                                if email_to_check in body or email_to_check in str(raw_email):
+                                    account_invalid_emails.append(email_to_check)
+                                    # Mark as read
+                                    mail.store(msg_id, '+FLAGS', '\\Seen')
+                                    break  # Found a bounce for this email, move to next email
                 
                 # Add invalid emails from this account
                 invalid_emails.extend(account_invalid_emails)
@@ -611,48 +503,10 @@ class BounceModel:
             except Exception as e:
                 logger.error(f"Error checking inbox for {account.get('email', 'unknown')}: {e}")
         
-        # Get list of all emails in the batch
-        all_emails = self._get_emails_from_batch(batch_id)
-        
         # Emails not in invalid_emails are considered valid
         valid_emails = [email for email in all_emails if email not in invalid_emails]
         
         return invalid_emails, valid_emails
-    
-    def _extract_invalid_email_from_bounce(self, body: str, raw_email: str) -> Optional[str]:
-        """
-        Extract the invalid email address from a bounce message.
-        
-        Args:
-            body: The body of the bounce message
-            raw_email: The raw email content
-            
-        Returns:
-            str or None: The invalid email address, or None if not found
-        """
-        # Common patterns for invalid emails in bounce messages
-        patterns = [
-            r'(?:failed for|failed recipient|failed address|unknown user|user unknown|user not found|no such user|recipient rejected|does not exist|invalid recipient|undeliverable to|not exist|not found|rejected recipient|recipient address rejected|mailbox unavailable|mailbox not found|no mailbox|address rejected|address not found|address does not exist|no such recipient|recipient does not exist|recipient unknown|unknown recipient|recipient not found|recipient no longer|recipient address no longer|user doesn\'t have|user does not have|no such account|account does not exist|account not found|account unavailable|account closed|account disabled|account suspended|account terminated|account deleted|account removed|account blocked|account locked|account inactive|account expired|account cancelled|account canceled|account deactivated|account discontinued|account rejected|account invalid|account not available|account not active|account not valid|account not recognized|account not accepted|account not allowed|account not permitted|account not authorized|account not authenticated|account not verified|account not confirmed|account not approved|account not enabled|account not accessible|account not reachable|account not deliverable|account not routable|account not routeable|account not routed|account not delivered|account not forwarded|account not relayed|account not sent|account not transmitted|account not transferred|account not transported|account not conveyed|account not dispatched|account not distributed|account not directed|account not addressed|account not mailed|account not emailed|account not messaged|account not communicated|account not contacted|account not reached|account not connected|account not linked|account not associated|account not related|account not affiliated|account not bound|account not tied|account not coupled|account not joined|account not united|account not attached|account not fixed|account not secured|account not fastened|account not anchored|account not moored|account not tethered|account not chained|account not roped|account not cabled|account not wired|account not corded|account not stringed|account not threaded|account not strung|account not laced|account not tied|account not knotted|account not looped|account not hooked|account not latched|account not locked|account not bolted|account not screwed|account not nailed|account not pinned|account not stapled|account not riveted|account not welded|account not soldered|account not glued|account not cemented|account not bonded|account not adhered|account not stuck|account not pasted|account not taped|account not tacked|account not thumbtacked|account not pushpinned|account not paperclipped|account not clipped|account not clamped|account not gripped|account not grasped|account not clutched|account not held|account not kept|account not maintained|account not preserved|account not retained|account not sustained|account not supported|account not upheld|account not propped|account not backed|account not braced|account not buttressed|account not reinforced|account not strengthened|account not fortified|account not bolstered|account not boosted|account not elevated|account not lifted|account not raised|account not hoisted|account not heightened|account not increased|account not enhanced|account not augmented|account not amplified|account not magnified|account not intensified|account not escalated|account not inflated|account not expanded|account not enlarged|account not extended|account not stretched|account not lengthened|account not widened|account not broadened|account not deepened|account not thickened|account not fattened|account not swelled|account not distended|account not bloated|account not puffed|account not ballooned|account not inflated|account not blown|account not pumped|account not filled|account not loaded|account not packed|account not stuffed|account not crammed|account not jammed|account not squeezed|account not pressed|account not pushed|account not shoved|account not thrust|account not forced|account not driven|account not propelled|account not impelled|account not urged|account not compelled|account not obliged|account not required|account not needed|account not wanted|account not desired|account not wished|account not requested|account not asked|account not demanded|account not ordered|account not commanded|account not directed|account not instructed|account not told|account not advised|account not counseled|account not guided|account not led|account not steered|account not piloted|account not navigated|account not conducted|account not escorted|account not accompanied|account not attended|account not chaperoned|account not guarded|account not protected|account not defended|account not shielded|account not sheltered|account not covered|account not screened|account not masked|account not disguised|account not hidden|account not concealed|account not veiled|account not cloaked|account not shrouded|account not obscured|account not camouflaged|account not buried|account not interred|account not entombed|account not inhumed|account not planted|account not sown|account not seeded|account not germinated|account not sprouted|account not budded|account not bloomed|account not blossomed|account not flowered|account not fruited|account not ripened|account not matured|account not developed|account not grown|account not evolved|account not progressed|account not advanced|account not proceeded|account not moved|account not shifted|account not transferred|account not relocated|account not displaced|account not repositioned|account not rearranged|account not reordered|account not reorganized|account not restructured|account not reconfigured|account not reformed|account not reshaped|account not remolded|account not remodeled|account not renovated|account not refurbished|account not refitted|account not rehabilitated|account not restored|account not revived|account not revitalized|account not rejuvenated|account not renewed|account not refreshed|account not replenished|account not restocked|account not resupplied|account not refilled|account not reloaded|account not repacked|account not restuffed|account not recrammed|account not rejammed|account not resqueezed|account not repressed|account not repushed|account not reshoved|account not rethrust|account not reforced|account not redriven|account not repropelled|account not reimpelled|account not reurged|account not recompelled|account not reobliged|account not rerequired|account not reneeded|account not rewanted|account not redesired|account not rewished|account not rerequested|account not reasked|account not redemanded|account not reordered|account not recommanded|account not redirected|account not reinstructed|account not retold|account not readvised|account not recounseled|account not reguided|account not reled|account not resteered|account not repiloted|account not renavigated|account not reconducted|account not reescorted|account not reaccompanied|account not reattended|account not rechaperoned|account not reguarded|account not reprotected|account not redefended|account not reshielded|account not resheltered|account not recovered|account not rescreened|account not remasked|account not redisguised|account not rehidden|account not reconcealed|account not reveiled|account not recloaked|account not reshrouded|account not reobscured|account not recamouflaged|account not reburied|account not reinterred|account not reentombed|account not reinhumed|account not replanted|account not resown|account not reseeded|account not regerminated|account not resprouted|account not rebudded|account not rebloomed|account not reblossomed|account not reflowered|account not refruited|account not reripened|account not rematured|account not redeveloped|account not regrown|account not reevolved|account not reprogressed|account not readvanced|account not reproceeded|account not removed|account not reshifted|account not retransferred|account not rerelocated|account not redisplaced|account not repositioned|account not rerearranged|account not rereordered|account not rereorganized|account not rerestructured|account not rereconfigured|account not rereformed|account not rereshaped|account not reremolded|account not reremodeled|account not rerenovated|account not rerefurbished|account not rerefitted|account not rerehabilitatedaccount not rerestored|account not rerevived|account not rerevitalized|account not rerejuvenated|account not rerenewed|account not rerefreshed|account not rereplenished|account not rerestocked|account not reresupplied|account not rerefilled|account not rereloaded|account not rerepacked|account not rerestuffed|account not rerecrammed|account not rerejammed|account not reresqueezed|account not rerepressed|account not rerepushed|account not rereshoved|account not rerethrust|account not rereforced|account not reredriven|account not rerepropelled|account not rereimpelled|account not rereurged|account not rerecompelled|account not rereobliged|account not rererequired|account not rereneeded|account not rerewanted|account not reredesired|account not rerewished|account not rererequested|account not rereasked|account not reredemanded|account not rereordered|account not rerecommanded|account not reredirected|account not rereinstructed|account not reretold|account not rereadvised|account not rerecounseled|account not rereguided|account not rereled|account not reresteered|account not rerepiloted|account not rerenavigated|account not rereconducted|account not rereescorted|account not rereaccompanied|account not rereattended|account not rerechaperoned|account not rereguarded|account not rereprotected|account not reredefended|account not rereshielded|account not reresheltered|account not rerecovered|account not rerescreened|account not reremasked|account not reredisguised|account not rerehidden|account not rereconcealed|account not rerevelied|account not rerecloaked|account not rereshrouded|account not rereobscured|account not rerecamouflaged|account not rereburied|account not rereinterred|account not rereentombed|account not rereinhumed|account not rereplanted|account not reresown|account not rereseeded|account not reregerminated|account not reresprouted|account not rerebudded|account not rerebloomed|account not rereblossomed|account not rereflowered|account not rerefruited|account not rereripened|account not rerematured|account not reredeveloped|account not reregrown|account not rereevolved|account not rereprogressed|account not rereadvanced|account not rereproceeded|account not reremoved|account not rereshifted|account not reretransferred|account not rererelocated|account not reredisplaced|account not rerepositione):[\s\n]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
-            r'(?:failed for|failed recipient|failed address|unknown user|user unknown|user not found|no such user|recipient rejected|does not exist|invalid recipient|undeliverable to|not exist|not found|rejected recipient|recipient address rejected|mailbox unavailable|mailbox not found|no mailbox|address rejected|address not found|address does not exist|no such recipient|recipient does not exist|recipient unknown|unknown recipient|recipient not found|recipient no longer|recipient address no longer|user doesn\'t have|user does not have|no such account|account does not exist|account not found|account unavailable|account closed|account disabled|account suspended|account terminated|account deleted|account removed|account blocked|account locked|account inactive|account expired|account cancelled|account canceled|account deactivated|account discontinued|account rejected|account invalid|account not available|account not active|account not valid|account not recognized|account not accepted|account not allowed|account not permitted|account not authorized|account not authenticated|account not verified|account not confirmed|account not approved|account not enabled|account not accessible|account not reachable|account not deliverable|account not routable|account not routeable|account not routed|account not delivered|account not forwarded|account not relayed|account not sent|account not transmitted|account not transferred|account not transported|account not conveyed|account not dispatched|account not distributed|account not directed|account not addressed|account not mailed|account not emailed|account not messaged|account not communicated|account not contacted|account not reached|account not connected|account not linked|account not associated|account not related|account not affiliated|account not bound|account not tied|account not coupled|account not joined|account not united|account not attached|account not fixed|account not secured|account not fastened|account not anchored|account not moored|account not tethered|account not chained|account not roped|account not cabled|account not wired|account not corded|account not stringed|account not threaded|account not strung|account not laced|account not tied|account not knotted|account not looped|account not hooked|account not latched|account not locked|account not bolted|account not screwed|account not nailed|account not pinned|account not stapled|account not riveted|account not welded|account not soldered|account not glued|account not cemented|account not bonded|account not adhered|account not stuck|account not pasted|account not taped|account not tacked|account not thumbtacked|account not pushpinned|account not paperclipped|account not clipped|account not clamped|account not gripped|account not grasped|account not clutched|account not held|account not kept|account not maintained|account not preserved|account not retained|account not sustained|account not supported|account not upheld|account not propped|account not backed|account not braced|account not buttressed|account not reinforced|account not strengthened|account not fortified|account not bolstered|account not boosted|account not elevated|account not lifted|account not raised|account not hoisted|account not heightened|account not increased|account not enhanced|account not augmented|account not amplified|account not magnified|account not intensified|account not escalated|account not inflated|account not expanded|account not enlarged|account not extended|account not stretched|account not lengthened|account not widened|account not broadened|account not deepened|account not thickened|account not fattened|account not swelled|account not distended|account not bloated|account not puffed|account not ballooned|account not inflated|account not blown|account not pumped|account not filled|account not loaded|account not packed|account not stuffed|account not crammed|account not jammed|account not squeezed|account not pressed|account not pushed|account not shoved|account not thrust|account not forced|account not driven|account not propelled|account not impelled|account not urged|account not compelled|account not obliged|account not required|account not needed|account not wanted|account not desired|account not wished|account not requested|account not asked|account not demanded|account not ordered|account not commanded|account not directed|account not instructed|account not told|account not advised|account not counseled|account not guided|account not led|account not steered|account not piloted|account not navigated|account not conducted|account not escorted|account not accompanied|account not attended|account not chaperoned|account not guarded|account not protected|account not defended|account not shielded|account not sheltered|account not covered|account not screened|account not masked|account not disguised|account not hidden|account not concealed|account not veiled|account not cloaked|account not shrouded|account not obscured|account not camouflaged|account not buried|account not interred|account not entombed|account not inhumed|account not planted|account not sown|account not seeded|account not germinated|account not sprouted|account not budded|account not bloomed|account not blossomed|account not flowered|account not fruited|account not ripened|account not matured|account not developed|account not grown|account not evolved|account not progressed|account not advanced|account not proceeded|account not moved|account not shifted|account not transferred|account not relocated|account not displaced|account not repositioned|account not rearranged|account not reordered|account not reorganized|account not restructured|account not reconfigured|account not reformed|account not reshaped|account not remolded|account not remodeled|account not renovated|account not refurbished|account not refitted|account not rehabilitatedaccount not rerestored|account not rerevived|account not rerevitalized|account not rerejuvenated|account not rerenewed|account not rerefreshed|account not rereplenished|account not rerestocked|account not reresupplied|account not rerefilled|account not rereloaded|account not rerepacked|account not rerestuffed|account not rerecrammed|account not rerejammed|account not reresqueezed|account not rerepressed|account not rerepushed|account not rereshoved|account not rerethrust|account not rereforced|account not reredriven|account not rerepropelled|account not rereimpelled|account not rereurged|account not rerecompelled|account not rereobliged|account not rererequired|account not rereneeded|account not rerewanted|account not reredesired|account not rerewished|account not rererequested|account not rereasked|account not reredemanded|account not rereordered|account not rerecommanded|account not reredirected|account not rereinstructed|account not reretold|account not rereadvised|account not rerecounseled|account not rereguided|account not rereled|account not reresteered|account not rerepiloted|account not rerenavigated|account not rereconducted|account not rereescorted|account not rereaccompanied|account not rereattended|account not rerechaperoned|account not rereguarded|account not rereprotected|account not reredefended|account not rereshielded|account not reresheltered|account not rerecovered|account not rerescreened|account not reremasked|account not reredisguised|account not rerehidden|account not rereconcealed|account not rerevelied|account not rerecloaked|account not rereshrouded|account not rereobscured|account not rerecamouflaged|account not rereburied|account not rereinterred|account not rereentombed|account not rereinhumed|account not rereplanted|account not reresown|account not rereseeded|account not reregerminated|account not reresprouted|account not rerebudded|account not rerebloomed|account not rereblossomed|account not rereflowered|account not rerefruited|account not rereripened|account not rerematured|account not reredeveloped|account not reregrown|account not rereevolved|account not rereprogressed|account not rereadvanced|account not rereproceeded|account not reremoved|account not rereshifted|account not reretransferred|account not rererelocated|account not reredisplaced|account not rerepositione).*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
-            r'(?:failed for|failed recipient|failed address|unknown user|user unknown|user not found|no such user|recipient rejected|does not exist|invalid recipient|undeliverable to|not exist|not found|rejected recipient|recipient address rejected|mailbox unavailable|mailbox not found|no mailbox|address rejected|address not found|address does not exist|no such recipient|recipient does not exist|recipient unknown|unknown recipient|recipient not found|recipient no longer|recipient address no longer|user doesn\'t have|user does not have|no such account|account does not exist|account not found|account unavailable|account closed|account disabled|account suspended|account terminated|account deleted|account removed|account blocked|account locked|account inactive|account expired|account cancelled|account canceled|account deactivated|account discontinued|account rejected|account invalid|account not available|account not active|account not valid|account not recognized|account not accepted|account not allowed|account not permitted|account not authorized|account not authenticated|account not verified|account not confirmed|account not approved|account not enabled|account not accessible|account not reachable|account not deliverable|account not routable|account not routeable|account not routed|account not delivered|account not forwarded|account not relayed|account not sent|account not transmitted|account not transferred|account not transported|account not conveyed|account not dispatched|account not distributed|account not directed|account not addressed|account not mailed|account not emailed|account not messaged|account not communicated|account not contacted|account not reached|account not connected|account not linked|account not associated|account not related|account not affiliated|account not bound|account not tied|account not coupled|account not joined|account not united|account not attached|account not fixed|account not secured|account not fastened|account not anchored|account not moored|account not tethered|account not chained|account not roped|account not cabled|account not wired|account not corded|account not stringed|account not threaded|account not strung|account not laced|account not tied|account not knotted|account not looped|account not hooked|account not latched|account not locked|account not bolted|account not screwed|account not nailed|account not pinned|account not stapled|account not riveted|account not welded|account not soldered|account not glued|account not cemented|account not bonded|account not adhered|account not stuck|account not pasted|account not taped|account not tacked|account not thumbtacked|account not pushpinned|account not paperclipped|account not clipped|account not clamped|account not gripped|account not grasped|account not clutched|account not held|account not kept|account not maintained|account not preserved|account not retained|account not sustained|account not supported|account not upheld|account not propped|account not backed|account not braced|account not buttressed|account not reinforced|account not strengthened|account not fortified|account not bolstered|account not boosted|account not elevated|account not lifted|account not raised|account not hoisted|account not heightened|account not increased|account not enhanced|account not augmented|account not amplified|account not magnified|account not intensified|account not escalated|account not inflated|account not expanded|account not enlarged|account not extended|account not stretched|account not lengthened|account not widened|account not broadened|account not deepened|account not thickened|account not fattened|account not swelled|account not distended|account not bloated|account not puffed|account not ballooned|account not inflated|account not blown|account not pumped|account not filled|account not loaded|account not packed|account not stuffed|account not crammed|account not jammed|account not squeezed|account not pressed|account not pushed|account not shoved|account not thrust|account not forced|account not driven|account not propelled|account not impelled|account not urged|account not compelled|account not obliged|account not required|account not needed|account not wanted|account not desired|account not wished|account not requested|account not asked|account not demanded|account not ordered|account not commanded|account not directed|account not instructed|account not told|account not advised|account not counseled|account not guided|account not led|account not steered|account not piloted|account not navigated|account not conducted|account not escorted|account not accompanied|account not attended|account not chaperoned|account not guarded|account not protected|account not defended|account not shielded|account not sheltered|account not covered|account not screened|account not masked|account not disguised|account not hidden|account not concealed|account not veiled|account not cloaked|account not shrouded|account not obscured|account not camouflaged|account not buried|account not interred|account not entombed|account not inhumed|account not planted|account not sown|account not seeded|account not germinated|account not sprouted|account not budded|account not bloomed|account not blossomed|account not flowered|account not fruited|account not ripened|account not matured|account not developed|account not grown|account not evolved|account not progressed|account not advanced|account not proceeded|account not moved|account not shifted|account not transferred|account not relocated|account not displaced|account not repositioned|account not rearranged|account not reordered|account not reorganized|account not restructured|account not reconfigured|account not reformed|account not reshaped|account not remolded|account not remodeled|account not renovated|account not refurbished|account not refitted|account not rehabilitated|account not restored|account not revived|account not revitalized|account not rejuvenated|account not renewed|account not refreshed|account not replenished|account not restocked|account not resupplied|account not refilled|account not reloaded|account not repacked|account not restuffed|account not recrammed|account not rejammed|account not resqueezed|account not repressed|account not repushed|account not reshoved|account not rethrust|account not reforced|account not redriven|account not repropelled|account not reimpelled|account not reurged|account not recompelled|account not reobliged|account not rerequired|account not reneeded|account not rewanted|account not redesired|account not rewished|account not rerequested|account not reasked|account not reredemanded|account not rereordered|account not rerecommanded|account not reredirected|account not rereinstructed|account not reretold|account not rereadvised|account not rerecounseled|account not rereguided|account not rereled|account not reresteered|account not rerepiloted|account not rerenavigated|account not rereconducted|account not rereescorted|account not rereaccompanied|account not rereattended|account not rerechaperoned|account not rereguarded|account not rereprotected|account not reredefended|account not rereshielded|account not reresheltered|account not rerecovered|account not rerescreened|account not reremasked|account not reredisguised|account not rerehidden|account not rereconcealed|account not rerevelied|account not rerecloaked|account not rereshrouded|account not rereobscured|account not rerecamouflaged|account not rereburied|account not rereinterred|account not rereentombed|account not rereinhumed|account not rereplanted|account not reresown|account not rereseeded|account not reregerminated|account not reresprouted|account not rerebudded|account not rerebloomed|account not rereblossomed|account not rereflowered|account not rerefruited|account not rereripened|account not rerematured|account not reredeveloped|account not reregrown|account not rereevolved|account not rereprogressed|account not rereadvanced|account not rereproceeded|account not reremoved|account not rereshifted|account not reretransferred|account not rererelocated|account not reredisplaced|account not rerepositione).*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
-            r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}).*?(?:failed|undeliverable|unknown|not found|does not exist|invalid|rejected|unavailable|no mailbox|no such|not exist|not active|disabled|suspended|terminated|deleted|removed|blocked|locked|inactive|expired|cancelled|canceled|deactivated|discontinued)',
-            r'Original-Recipient:.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
-            r'Final-Recipient:.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
-            r'X-Failed-Recipients:.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
-            if match:
-                return match.group(1)
-        
-        # If no match found in body, try the raw email
-        for pattern in patterns:
-            match = re.search(pattern, raw_email, re.IGNORECASE | re.DOTALL)
-            if match:
-                return match.group(1)
-        
-        return None
     
     def _get_emails_from_batch(self, batch_id: str) -> List[str]:
         """
@@ -666,117 +520,47 @@ class BounceModel:
         """
         emails = []
         
-        # Check the batch file
-        batch_file = os.path.join(self.batches_dir, f"{batch_id}.csv")
+        # Determine the correct file path
+        if batch_id.startswith("batch_"):
+            # Existing batch ID
+            file_path = os.path.join("./results", batch_id, "email_b.csv")
+        else:
+            # New bounce verification
+            file_path = os.path.join(self.results_dir, batch_id, "email_b.csv")
         
-        if os.path.exists(batch_file):
+        if os.path.exists(file_path):
             try:
-                with open(batch_file, 'r', newline='', encoding='utf-8') as f:
+                with open(file_path, 'r', newline='', encoding='utf-8') as f:
                     reader = csv.reader(f)
-                    next(reader)  # Skip header
+                    next(reader)  # Skip first line (batch ID)
                     
                     for row in reader:
                         if row and len(row) >= 1:
                             emails.append(row[0])
             except Exception as e:
-                logger.error(f"Error reading batch file {batch_file}: {e}")
+                logger.error(f"Error reading email file {file_path}: {e}")
         
-        # If no emails found in batch file, check the sent emails log
+        # If no emails found in email file, check the sent emails log
         if not emails:
             try:
-                log_file = os.path.join("./data", "sent_emails.log")
+                # Determine the correct log file location
+                if batch_id.startswith("batch_"):
+                    # Existing batch ID
+                    log_file = os.path.join("./results", batch_id, "sent_emails.log")
+                else:
+                    # New bounce verification
+                    log_file = os.path.join(self.results_dir, batch_id, "sent_emails.log")
                 
                 if os.path.exists(log_file):
                     with open(log_file, 'r', encoding='utf-8') as f:
                         for line in f:
-                            if batch_id in line:
-                                parts = line.strip().split(',')
-                                if len(parts) >= 2:
-                                    emails.append(parts[1])
+                            parts = line.strip().split(',')
+                            if len(parts) >= 2:
+                                emails.append(parts[1])
             except Exception as e:
                 logger.error(f"Error reading sent emails log: {e}")
         
         return emails
-    
-    def _save_results(self, invalid_emails: List[str], valid_emails: List[str], batch_id: str) -> None:
-        """
-        Save verification results to files.
-        
-        Args:
-            invalid_emails: List of invalid email addresses
-            valid_emails: List of valid email addresses
-            batch_id: The batch ID
-        """
-        # Update the batch file
-        batch_file = os.path.join(self.batches_dir, f"{batch_id}.csv")
-        
-        if os.path.exists(batch_file):
-            try:
-                # Read the current batch file
-                rows = []
-                with open(batch_file, 'r', newline='', encoding='utf-8') as f:
-                    reader = csv.reader(f)
-                    header = next(reader)
-                    rows.append(header)
-                    
-                    for row in reader:
-                        if len(row) >= 3:
-                            email = row[0]
-                            
-                            if email in invalid_emails:
-                                row[1] = INVALID
-                            elif email in valid_emails:
-                                row[1] = VALID
-                            
-                            # Update timestamp
-                            row[2] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        rows.append(row)
-                
-                # Write the updated batch file
-                with open(batch_file, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    for row in rows:
-                        writer.writerow(row)
-                
-                # Update tracking
-                for email in invalid_emails:
-                    if email in self.sent_emails:
-                        self.sent_emails[email]["status"] = INVALID
-                        self.sent_emails[email]["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                for email in valid_emails:
-                    if email in self.sent_emails:
-                        self.sent_emails[email]["status"] = VALID
-                        self.sent_emails[email]["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-            except Exception as e:
-                logger.error(f"Error updating batch file {batch_file}: {e}")
-        
-        # Save results to separate files
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        
-        # Save invalid emails
-        if invalid_emails:
-            invalid_file = os.path.join(self.results_dir, f"{batch_id}_invalid_{timestamp}.csv")
-            
-            with open(invalid_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(["email", "batch_id", "timestamp", "reason"])
-                
-                for email in invalid_emails:
-                    writer.writerow([email, batch_id, timestamp, "Email bounced back as invalid"])
-        
-        # Save valid emails
-        if valid_emails:
-            valid_file = os.path.join(self.results_dir, f"{batch_id}_valid_{timestamp}.csv")
-            
-            with open(valid_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(["email", "batch_id", "timestamp", "reason"])
-                
-                for email in valid_emails:
-                    writer.writerow([email, batch_id, timestamp, "No bounce-back received"])
     
     def get_all_batches(self) -> List[Dict[str, Any]]:
         """
@@ -788,68 +572,398 @@ class BounceModel:
         batches = []
         
         try:
-            for filename in os.listdir(self.batches_dir):
-                if filename.endswith(".csv"):
-                    batch_id = os.path.splitext(filename)[0]
-                    batch_file = os.path.join(self.batches_dir, filename)
-                    
-                    # Get batch statistics
-                    total_emails = 0
-                    valid_count = 0
-                    invalid_count = 0
-                    pending_count = 0
-                    created_time = ""
-                    
-                    with open(batch_file, 'r', newline='', encoding='utf-8') as f:
-                        reader = csv.reader(f)
-                        next(reader)  # Skip header
+            # Check results directory for batch folders
+            results_dir = "./results"
+            if os.path.exists(results_dir):
+                for item in os.listdir(results_dir):
+                    item_path = os.path.join(results_dir, item)
+                    if os.path.isdir(item_path) and item.startswith("batch_"):
+                        batch_id = item
                         
-                        for row in reader:
-                            if len(row) >= 3:
-                                total_emails += 1
-                                
-                                if row[1] == VALID:
-                                    valid_count += 1
-                                elif row[1] == INVALID:
-                                    invalid_count += 1
-                                elif row[1] == PENDING:
-                                    pending_count += 1
-                                
-                                if not created_time and row[2]:
-                                    created_time = row[2]
-                    
-                    batches.append({
-                        "batch_id": batch_id,
-                        "created": created_time,
-                        "total_emails": total_emails,
-                        "valid": valid_count,
-                        "invalid": invalid_count,
-                        "pending": pending_count,
-                        "status": "Completed" if pending_count == 0 else "Waiting for checking"
-                    })
+                        # Get batch statistics if available
+                        status_file = os.path.join(item_path, "status.json")
+                        status_b_file = os.path.join(item_path, "status_b.json")
+                        email_b_file = os.path.join(item_path, "email_b.csv")
+                        
+                        # Only include if it has email_b.csv or status_b.json
+                        if not (os.path.exists(email_b_file) or os.path.exists(status_b_file)):
+                            continue
+                        
+                        created_time = ""
+                        total_emails = 0
+                        valid_count = 0
+                        invalid_count = 0
+                        risky_count = 0
+                        custom_count = 0
+                        pending_count = 0
+                        status = "Unknown"
+                        
+                        if os.path.exists(status_file):
+                            try:
+                                with open(status_file, 'r', encoding='utf-8') as f:
+                                    status_data = json.load(f)
+                                    created_time = status_data.get("start_time", "")
+                                    total_emails = status_data.get("total_emails", 0)
+                                    valid_count = status_data.get("results", {}).get("valid", 0)
+                                    invalid_count = status_data.get("results", {}).get("invalid", 0)
+                                    risky_count = status_data.get("results", {}).get("risky", 0)
+                                    custom_count = status_data.get("results", {}).get("custom", 0)
+                                    pending_count = total_emails - (valid_count + invalid_count + risky_count + custom_count)
+                            except Exception as e:
+                                logger.error(f"Error reading status file for {batch_id}: {e}")
+                        
+                        # Check if there's a bounce status file
+                        if os.path.exists(status_b_file):
+                            try:
+                                with open(status_b_file, 'r', encoding='utf-8') as f:
+                                    status_b_data = json.load(f)
+                                    if not created_time:
+                                        created_time = status_b_data.get("created", "")
+                                    if total_emails == 0:
+                                        total_emails = status_b_data.get("total_emails", 0)
+                                    valid_count = status_b_data.get("valid", 0)
+                                    invalid_count = status_b_data.get("invalid", 0)
+                                    risky_count = status_b_data.get("risky", 0)
+                                    custom_count = status_b_data.get("custom", 0)
+                                    pending_count = status_b_data.get("pending", 0)
+                                    status = status_b_data.get("status", "Pending")
+                            except Exception as e:
+                                logger.error(f"Error reading status_b file for {batch_id}: {e}")
+                        
+                        batches.append({
+                            "batch_id": batch_id,
+                            "created": created_time,
+                            "total_emails": total_emails,
+                            "valid": valid_count,
+                            "invalid": invalid_count,
+                            "risky": risky_count,
+                            "custom": custom_count,
+                            "pending": pending_count,
+                            "status": status
+                        })
+            
+            # Also check bounce_results directory
+            bounce_results_dir = os.path.join("./results", "bounce_results")
+            if os.path.exists(bounce_results_dir):
+                for item in os.listdir(bounce_results_dir):
+                    item_path = os.path.join(bounce_results_dir, item)
+                    if os.path.isdir(item_path) and item.startswith("bounce_"):
+                        batch_id = item
+                        
+                        # Get batch statistics if available
+                        status_b_file = os.path.join(item_path, "status_b.json")
+                        email_b_file = os.path.join(item_path, "email_b.csv")
+                        
+                        # Only include if it has email_b.csv or status_b.json
+                        if not (os.path.exists(email_b_file) or os.path.exists(status_b_file)):
+                            continue
+                        
+                        created_time = ""
+                        total_emails = 0
+                        valid_count = 0
+                        invalid_count = 0
+                        risky_count = 0
+                        custom_count = 0
+                        pending_count = 0
+                        status = "Unknown"
+                        
+                        if os.path.exists(status_b_file):
+                            try:
+                                with open(status_b_file, 'r', encoding='utf-8') as f:
+                                    status_b_data = json.load(f)
+                                    created_time = status_b_data.get("created", "")
+                                    total_emails = status_b_data.get("total_emails", 0)
+                                    valid_count = status_b_data.get("valid", 0)
+                                    invalid_count = status_b_data.get("invalid", 0)
+                                    risky_count = status_b_data.get("risky", 0)
+                                    custom_count = status_b_data.get("custom", 0)
+                                    pending_count = status_b_data.get("pending", 0)
+                                    status = status_b_data.get("status", "Pending")
+                            except Exception as e:
+                                logger.error(f"Error reading status_b file for {batch_id}: {e}")
+                        
+                        batches.append({
+                            "batch_id": batch_id,
+                            "created": created_time,
+                            "total_emails": total_emails,
+                            "valid": valid_count,
+                            "invalid": invalid_count,
+                            "risky": risky_count,
+                            "custom": custom_count,
+                            "pending": pending_count,
+                            "status": status
+                        })
         except Exception as e:
             logger.error(f"Error getting batch information: {e}")
         
         # Sort batches by creation time (newest first)
-        batches.sort(key=lambda x: x["created"], reverse=True)
+        batches.sort(key=lambda x: x["created"] if x["created"] else "", reverse=True)
         
         return batches
     
-    def process_responses(self, batch_id: str) -> Tuple[int, int]:
+    def process_responses(self, batch_id: str, save_results: bool = False) -> Tuple[List[str], List[str]]:
         """
         Process responses for a verification batch.
         
         Args:
             batch_id: The batch ID
+            save_results: Whether to save the results (default: False)
             
         Returns:
-            Tuple[int, int]: Count of invalid and valid emails
+            Tuple[List[str], List[str]]: Lists of invalid and valid emails
         """
         # Check for bounce-backs
         invalid_emails, valid_emails = self._check_inbox_for_bounces(batch_id)
         
-        # Update the batch file with results
-        self._save_results(invalid_emails, valid_emails, batch_id)
+        # Update the status file with results only if save_results is True
+        if save_results:
+            self._update_email_statuses(batch_id, invalid_emails, valid_emails)
+            self.save_bounce_results(batch_id, invalid_emails, valid_emails)
         
-        return len(invalid_emails), len(valid_emails)
+        return invalid_emails, valid_emails
+    
+    def _update_email_statuses(self, batch_id: str, invalid_emails: List[str], valid_emails: List[str]) -> None:
+        """
+        Update the status of emails in the email_b.csv file.
+        
+        Args:
+            batch_id: The batch ID
+            invalid_emails: List of invalid email addresses
+            valid_emails: List of valid email addresses
+        """
+        # Determine the correct file path
+        if batch_id.startswith("batch_"):
+            # Existing batch ID
+            file_path = os.path.join("./results", batch_id, "email_b.csv")
+        else:
+            # New bounce verification
+            file_path = os.path.join(self.results_dir, batch_id, "email_b.csv")
+        
+        if not os.path.exists(file_path):
+            logger.error(f"Email file {file_path} not found")
+            return
+        
+       
+        
+        # Read the current email file
+        rows = []
+        with open(file_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            # First row is the batch ID
+            batch_id_row = next(reader)
+            rows.append(batch_id_row)
+            
+            for row in reader:
+                if len(row) >= 3:
+                    email = row[0]
+                    
+                    if email in invalid_emails:
+                        row[1] = INVALID
+                    elif email in valid_emails:
+                        row[1] = VALID
+                    
+                    # Update timestamp
+                    row[2] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                rows.append(row)
+        
+        # Write the updated email file
+        with open(file_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            for row in rows:
+                writer.writerow(row)
+    
+    def get_emails_by_reason(self, reason_filter: List[str] = None) -> List[str]:
+        """
+        Get emails from results files filtered by reason.
+        
+        Args:
+            reason_filter: List of reason substrings to filter by
+            
+        Returns:
+            List[str]: List of email addresses matching the filter
+        """
+        if not reason_filter:
+            return []
+        
+        emails = []
+        
+        # Check invalid results file
+        results_file = os.path.join("./results", "invalid.csv")
+        if os.path.exists(results_file):
+            try:
+                with open(results_file, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    next(reader)  # Skip header
+                    
+                    for row in reader:
+                        if len(row) >= 4:  # Email, Provider, Timestamp, Reason
+                            email = row[0]
+                            reason = row[3]
+                            
+                            # Check if reason matches any filter
+                            if any(filter_text.lower() in reason.lower() for filter_text in reason_filter):
+                                emails.append(email)
+            except Exception as e:
+                logger.error(f"Error reading invalid results file: {e}")
+        
+        return emails
+    
+    def get_unique_reasons(self, batch_id: str = None) -> Dict[str, List[str]]:
+        """
+        Get unique reasons from invalid emails, optionally filtered by batch ID.
+        
+        Args:
+            batch_id: Optional batch ID to filter by
+            
+        Returns:
+            Dict[str, List[str]]: Dictionary mapping reasons to lists of emails
+        """
+        reason_to_emails = {}
+        
+        try:
+            # Check the invalid results file
+            results_file = os.path.join("./results", "invalid.csv")
+            
+            if os.path.exists(results_file):
+                with open(results_file, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    next(reader)  # Skip header
+                    
+                    for row in reader:
+                        if len(row) >= 6:  # Ensure we have all columns
+                            email = row[0]
+                            reason = row[3] if row[3] else "Unknown"
+                            row_batch_id = row[5] if len(row) > 5 else ""
+                            
+                            # Filter by batch ID if provided
+                            if batch_id and row_batch_id != batch_id:
+                                continue
+                            
+                            if reason not in reason_to_emails:
+                                reason_to_emails[reason] = []
+                            
+                            reason_to_emails[reason].append(email)
+            
+            return reason_to_emails
+        except Exception as e:
+            logger.error(f"Error getting unique reasons: {e}")
+            return {}
+    
+    def save_bounce_results(self, batch_id: str, invalid_emails: List[str], valid_emails: List[str]) -> None:
+        """
+        Save bounce verification results to the correct location.
+        
+        Args:
+            batch_id: The batch ID
+            invalid_emails: List of invalid email addresses
+            valid_emails: List of valid email addresses
+        """
+        try:
+            # Determine the correct save location based on batch_id
+            if batch_id.startswith("batch_"):
+                # Case 1: Existing batch ID
+                results_dir = os.path.join("./results", batch_id)
+            else:
+                # Case 2: New generated ID
+                results_dir = os.path.join("./results/bounce_results", batch_id)
+            
+            os.makedirs(results_dir, exist_ok=True)
+            
+            # Get all emails from the batch
+            all_emails = self._get_emails_from_batch(batch_id)
+            
+            # Determine risky emails (not in valid or invalid)
+            risky_emails = [email for email in all_emails if email not in valid_emails and email not in invalid_emails]
+            
+            # Get existing status data if available
+            status_file = os.path.join(results_dir, "status_b.json")
+            status_data = {}
+            
+            if os.path.exists(status_file):
+                try:
+                    with open(status_file, 'r', encoding='utf-8') as f:
+                        status_data = json.load(f)
+                except Exception as e:
+                    logger.error(f"Error reading status file {status_file}: {e}")
+            
+            # Update status data
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            if not status_data:
+                # Create new status data
+                status_data = {
+                    "batch_id": batch_id,
+                    "created": now,
+                    "status": "checked",
+                    "total_emails": len(all_emails),
+                    "valid": len(valid_emails),
+                    "invalid": len(invalid_emails),
+                    "risky": len(risky_emails),
+                    "custom": 0,
+                    "pending": len(risky_emails),
+                    "checking_attempts": 1,
+                    "last_checked": now,
+                    "first_checked": now,
+                    "valid_list": valid_emails,
+                    "invalid_list": invalid_emails,
+                    "risky_list": risky_emails,
+                    "custom_list": []
+                }
+            else:
+                # Update existing status data
+                status_data["status"] = "checked"
+                status_data["valid"] = len(valid_emails)
+                status_data["invalid"] = len(invalid_emails)
+                status_data["risky"] = len(risky_emails)
+                status_data["pending"] = len(risky_emails)
+                status_data["checking_attempts"] = status_data.get("checking_attempts", 0) + 1
+                status_data["last_checked"] = now
+                
+                if "first_checked" not in status_data:
+                    status_data["first_checked"] = now
+                
+                status_data["valid_list"] = valid_emails
+                status_data["invalid_list"] = invalid_emails
+                status_data["risky_list"] = risky_emails
+            
+            # Save status data
+            with open(status_file, 'w', encoding='utf-8') as f:
+                json.dump(status_data, f, indent=4)
+            
+            logger.info(f"Bounce results saved to {status_file}")
+            
+        except Exception as e:
+            logger.error(f"Error saving bounce results: {e}")
+    
+    def get_emails_by_batch_id(self, batch_id: str, category: str) -> List[str]:
+        """
+        Get emails from a specific batch and category.
+        
+        Args:
+            batch_id: The batch ID
+            category: The category (valid, invalid, risky, custom)
+            
+        Returns:
+            List[str]: List of email addresses
+        """
+        emails = []
+        
+        try:
+            # Check the results file for the category
+            results_file = os.path.join("./results", f"{category}.csv")
+            
+            if os.path.exists(results_file):
+                with open(results_file, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    next(reader)  # Skip header
+                    
+                    for row in reader:
+                        if len(row) >= 6 and row[5] == batch_id:  # BatchID is in column 5
+                            emails.append(row[0])  # Email is in column 0
+            
+            return emails
+        except Exception as e:
+            logger.error(f"Error getting emails for batch {batch_id} and category {category}: {e}")
+            return []
 

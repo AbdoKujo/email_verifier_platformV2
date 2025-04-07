@@ -61,6 +61,10 @@ def verify_batch():
     emails = data['emails']
     job_id = data.get('job_id', f"batch_{int(time.time())}_{uuid.uuid4().hex[:8]}")
     
+    def getJobId():
+        """Get the job ID for the batch verification."""
+        return job_id    
+    
     # Use streaming response to provide real-time updates
     def generate():
         for result in verification_service.verify_batch_emails_stream(emails, job_id):
@@ -156,6 +160,7 @@ def update_settings():
         return jsonify(result)
     else:
         return jsonify(result), 400
+
 
 if __name__ == '__main__':
     # Create static directory if it doesn't exist

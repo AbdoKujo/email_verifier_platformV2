@@ -8,8 +8,9 @@ import logging
 import tempfile
 import traceback
 import csv
+import uuid
 from datetime import datetime
-from typing import Dict, List, Any, Optional, Generator, Union, Tuple
+from typing import Dict, List, Any, Optional, Generator, Union, Tuple, Set
 
 # Add parent directory to path to import models
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -100,6 +101,17 @@ class VerificationService:
             except:
                 return 'other'
 
+    def get_job_id(self) -> str:
+        """
+        Generate a unique job ID for batch verification.
+        
+        Returns:
+            str: A unique job ID
+        """
+        timestamp = int(time.time())
+        random_id = uuid.uuid4().hex[:8]
+        return f"batch_{timestamp}_{random_id}"
+
     def verify_batch_emails_stream(self, emails: List[str], job_id: str) -> Generator[Dict[str, Any], None, None]:
         """
         Verify a batch of email addresses using terminalController and stream results as they become available.
@@ -156,6 +168,9 @@ class VerificationService:
         # Create output queue for terminal monitoring
         output_queue = []
         
+        # Create a set to track which emails have been verified
+        verified_emails = set()
+        
         # Start terminal controller in a separate thread
         terminal_thread = threading.Thread(
             target=self._run_terminal_controller,
@@ -164,23 +179,222 @@ class VerificationService:
         terminal_thread.daemon = True
         terminal_thread.start()
         
-        # Start monitor thread to yield results
-        for result in self._monitor_terminal_controller_stream(job_id, output_queue, emails):
-            yield result
+        # Monitor for results and yield them as they become available
+        try:
+            # Maximum wait time for verification (in seconds)
+            max_wait_time = 600  # 10 minutes
+            start_time = time.time()
+            last_activity_time = time.time()
+            last_verified_count = 0
             
-        # Wait for terminal thread to complete
-        terminal_thread.join(timeout=60)
+            # Keep monitoring until all emails are verified or timeout occurs
+            while len(verified_emails) < len(emails):
+                # Check if we've exceeded the maximum wait time
+                current_time = time.time()
+                if current_time - start_time > max_wait_time:
+                    logger.warning(f"Maximum wait time exceeded for job {job_id}. Verifying remaining emails.")
+                    break
+                
+                # Check if there's been no activity for a while
+                if current_time - last_activity_time > 60 and not terminal_thread.is_alive():
+                    logger.warning(f"No activity for 60 seconds and terminal controller has stopped for job {job_id}.")
+                    # Only break if we've verified some emails and there's been no progress
+                    if len(verified_emails) > 0 and len(verified_emails) == last_verified_count:
+                        break
+                
+                # Check data files for new results
+                new_results = self._check_data_files_for_results(emails, verified_emails, job_id)
+                
+                # Yield any new results
+                for result in new_results:
+                    verified_emails.add(result['email'])
+                    yield result
+                
+                # Update activity tracking
+                if len(verified_emails) > last_verified_count:
+                    last_activity_time = current_time
+                    last_verified_count = len(verified_emails)
+                
+                # Sleep to avoid high CPU usage
+                time.sleep(0.5)
+            
+            # If we still haven't verified all emails, mark remaining as risky
+            remaining_emails = set(emails) - verified_emails
+            if remaining_emails:
+                logger.warning(f"Marking {len(remaining_emails)} unverified emails as risky for job {job_id}")
+                
+                for email in remaining_emails:
+                    # Create a risky result for this email
+                    result = {
+                        'email': email,
+                        'status': RISKY,
+                        'provider': self._detect_provider(email),
+                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'reason': 'Verification timed out or incomplete'
+                    }
+                    
+                    # Update job status
+                    if job_id in self.active_jobs:
+                        if email not in self.active_jobs[job_id]['email_results']:
+                            self.active_jobs[job_id]['verified_emails'] += 1
+                            self.active_jobs[job_id]['results'][RISKY] += 1
+                            
+                            # Store minimal result
+                            self.active_jobs[job_id]['email_results'][email] = {
+                                "email": email,
+                                "category": RISKY,
+                                "provider": result['provider']
+                            }
+                    
+                    # Yield the result
+                    verified_emails.add(email)
+                    yield result
+                
+                # Save updated status
+                self._save_job_status(job_id)
+            
+            # Update job status to completed
+            if job_id in self.active_jobs:
+                self.active_jobs[job_id]['status'] = 'completed'
+                self.active_jobs[job_id]['end_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._save_job_status(job_id)
+            
+            # Yield final status
+            yield {
+                'job_id': job_id,
+                'status': 'completed',
+                'total_emails': len(emails),
+                'verified_emails': len(verified_emails),
+                'results': self.active_jobs[job_id]['results'] if job_id in self.active_jobs else {},
+                'message': 'Batch verification completed',
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in batch verification stream: {e}")
+            logger.error(traceback.format_exc())
+            
+            # Update job status to failed
+            if job_id in self.active_jobs:
+                self.active_jobs[job_id]['status'] = 'failed'
+                self.active_jobs[job_id]['end_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.active_jobs[job_id]['error'] = str(e)
+                self._save_job_status(job_id)
+            
+            # Yield error status
+            yield {
+                'job_id': job_id,
+                'status': 'failed',
+                'error': str(e),
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+    
+    def _check_data_files_for_results(self, emails: List[str], verified_emails: Set[str], job_id: str) -> List[Dict[str, Any]]:
+        """
+        Check data files for new verification results.
         
-        # Yield final status
-        yield {
-            'job_id': job_id,
-            'status': self.active_jobs[job_id]['status'],
-            'total_emails': len(emails),
-            'verified_emails': self.active_jobs[job_id]['verified_emails'],
-            'results': self.active_jobs[job_id]['results'],
-            'message': f"Batch verification {self.active_jobs[job_id]['status']}",
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        Args:
+            emails: List of emails to verify
+            verified_emails: Set of emails that have already been verified
+            job_id: Unique identifier for this verification job
+            
+        Returns:
+            List[Dict[str, Any]]: List of new verification results
+        """
+        new_results = []
+        
+        # Create a set of emails to check (only those not yet verified)
+        emails_to_check = set(emails) - verified_emails
+        
+        # Check each category's data file
+        for category, category_code in [("Valid", VALID), ("Invalid", INVALID), ("Risky", RISKY), ("Custom", CUSTOM)]:
+            data_file = os.path.join("./data", f"{category}.csv")
+            if os.path.exists(data_file):
+                try:
+                    with open(data_file, 'r', encoding='utf-8', newline='') as f:
+                        reader = csv.reader(f)
+                        for row in reader:
+                            if row and row[0] in emails_to_check:
+                                # Create a result for this email
+                                email = row[0]
+                                provider = self._detect_provider(email)
+                                
+                                # Try to get reason from results file
+                                reason = self._get_reason_from_results(email, category_code)
+                                
+                                result = {
+                                    'email': email,
+                                    'status': category_code,
+                                    'provider': provider,
+                                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    'reason': reason
+                                }
+                                
+                                # Update job status
+                                if job_id in self.active_jobs:
+                                    if email not in self.active_jobs[job_id]['email_results']:
+                                        self.active_jobs[job_id]['verified_emails'] += 1
+                                        self.active_jobs[job_id]['results'][category_code] += 1
+                                        
+                                        # Store minimal result
+                                        self.active_jobs[job_id]['email_results'][email] = {
+                                            "email": email,
+                                            "category": category_code,
+                                            "provider": provider
+                                        }
+                                        
+                                        # Save updated status
+                                        self._save_job_status(job_id)
+                                
+                                # Add to new results
+                                new_results.append(result)
+                                
+                                # Remove from emails to check
+                                emails_to_check.remove(email)
+                except Exception as e:
+                    logger.error(f"Error reading {category} data file: {e}")
+        
+        return new_results
+    
+    def _get_reason_from_results(self, email: str, category: str) -> str:
+        """
+        Get verification reason from results file.
+        
+        Args:
+            email: The email address
+            category: The verification category
+            
+        Returns:
+            str: The verification reason
+        """
+        # Map category to results file
+        category_map = {
+            VALID: "valid.csv",
+            INVALID: "invalid.csv",
+            RISKY: "risky.csv",
+            CUSTOM: "custom.csv"
         }
+        
+        if category not in category_map:
+            return "Unknown"
+        
+        results_file = os.path.join(self.results_dir, category_map[category])
+        
+        if not os.path.exists(results_file):
+            return "Unknown"
+        
+        try:
+            with open(results_file, 'r', encoding='utf-8', newline='') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                for row in reader:
+                    if row and row[0] == email:
+                        # Return reason (column 3)
+                        return row[3] if len(row) > 3 and row[3] else "Unknown"
+        except Exception as e:
+            logger.error(f"Error reading reason from results file: {e}")
+        
+        return "Unknown"
     
     def _run_terminal_controller(self, emails_file: str, job_id: str, num_terminals: int, output_queue: List) -> None:
         """
@@ -193,9 +407,6 @@ class VerificationService:
             output_queue: Queue to store terminal controller output
         """
         try:
-            import importlib.util
-            import sys
-            
             # Update job status
             if job_id in self.active_jobs:
                 self.active_jobs[job_id]['status'] = 'processing'
@@ -206,6 +417,11 @@ class VerificationService:
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 "terminalController.py"
             )
+            
+            # Create a temporary file to pass the job ID to terminalController
+            job_id_file = os.path.join(os.path.dirname(emails_file), "job_id.txt")
+            with open(job_id_file, 'w', encoding='utf-8') as f:
+                f.write(job_id)
             
             # Log the command that will be executed
             cmd = [
@@ -245,27 +461,27 @@ class VerificationService:
             stdout_thread.start()
             stderr_thread.start()
             
-            # Wait for process to complete
-            process.wait()
+            # Wait for process to complete with timeout
+            try:
+                process.wait(timeout=300)  # 5 minute timeout
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Terminal controller process timed out for job {job_id}")
+                # Don't kill the process, let it continue running
             
             stdout_thread.join(timeout=5)
             stderr_thread.join(timeout=5)
             
-            # Check return code
-            if process.returncode != 0:
-                logger.error(f"Terminal controller process failed with return code {process.returncode}")
-                if job_id in self.active_jobs:
-                    self.active_jobs[job_id]['status'] = 'failed'
-                    self.active_jobs[job_id]['error'] = f"Terminal controller process failed with return code {process.returncode}"
-                    self._save_job_status(job_id)
-            else:
-                logger.info("Terminal controller process completed successfully")
-                if job_id in self.active_jobs:
-                    self.active_jobs[job_id]['status'] = 'completed'
-                    self._save_job_status(job_id)
-                    
-            # Process results
-            self._process_terminal_results(job_id)
+            # Check return code if process has completed
+            if process.poll() is not None:
+                if process.returncode != 0:
+                    logger.error(f"Terminal controller process failed with return code {process.returncode}")
+                    if job_id in self.active_jobs:
+                        self.active_jobs[job_id]['status'] = 'failed'
+                        self.active_jobs[job_id]['error'] = f"Terminal controller process failed with return code {process.returncode}"
+                        self._save_job_status(job_id)
+                else:
+                    logger.info("Terminal controller process completed successfully")
+                    # Don't mark as completed yet, wait for all emails to be verified
             
         except Exception as e:
             logger.error(f"Error running terminal controller: {e}")
@@ -275,289 +491,6 @@ class VerificationService:
                 self.active_jobs[job_id]['status'] = 'failed'
                 self.active_jobs[job_id]['error'] = str(e)
                 self._save_job_status(job_id)
-    
-    def _monitor_terminal_controller_stream(self, job_id: str, output_queue: List, emails: List[str]) -> Generator[Dict[str, Any], None, None]:
-        """
-        Monitor the terminal controller output and yield results as they become available.
-        
-        Args:
-            job_id: Unique identifier for this verification job
-            output_queue: Queue containing terminal controller output
-            emails: List of email addresses to verify
-            
-        Returns:
-            Generator[Dict[str, Any], None, None]: Generator yielding verification results
-        """
-        # Track processed lines to avoid duplicates
-        processed_lines = set()
-        
-        # Track progress for each email
-        email_progress = {email: False for email in emails}
-        
-        # Create a mapping of filename patterns to categories
-        category_patterns = {
-            "Valid": VALID,
-            "Invalid": INVALID,
-            "Risky": RISKY,
-            "Custom": CUSTOM
-        }
-        
-        # Initialize email result counters
-        counts = {
-            VALID: 0,
-            INVALID: 0,
-            RISKY: 0,
-            CUSTOM: 0
-        }
-        
-        # Run until all emails are verified or until terminalController completes
-        max_wait_time = 300  # Maximum wait time in seconds
-        start_time = time.time()
-        last_activity_time = time.time()
-        last_processed_count = 0
-        
-        while (not all(email_progress.values()) and 
-               (time.time() - start_time < max_wait_time) and
-               (time.time() - last_activity_time < 60)):  # Timeout after 60 seconds of inactivity
-            
-            # Process any new output from terminal controller
-            current_queue = list(output_queue)  # Make a copy to avoid concurrent modification
-            
-            # Check for activity
-            processed_count = 0
-            
-            for line in current_queue:
-                line_key = line.strip()
-                if line_key and line_key not in processed_lines:
-                    processed_lines.add(line_key)
-                    processed_count += 1
-                    
-                    # Look for email verification results in the output
-                    if any(category in line for category in category_patterns.keys()):
-                        self._extract_and_process_results(line, category_patterns, email_progress, job_id, counts)
-            
-            # If we processed any lines, update the last activity time
-            if processed_count > last_processed_count:
-                last_activity_time = time.time()
-                last_processed_count = processed_count
-            
-            # Check data files for results
-            for category, category_code in category_patterns.items():
-                data_file = os.path.join("./data", f"{category}.csv")
-                if os.path.exists(data_file):
-                    try:
-                        with open(data_file, 'r', encoding='utf-8', newline='') as f:
-                            reader = csv.reader(f)
-                            for row in reader:
-                                if row and row[0] in email_progress and not email_progress[row[0]]:
-                                    # Mark email as processed
-                                    email_progress[row[0]] = True
-                                    
-                                    # Update job status
-                                    if job_id in self.active_jobs:
-                                        if row[0] not in self.active_jobs[job_id]['email_results']:
-                                            self.active_jobs[job_id]['verified_emails'] += 1
-                                            counts[category_code] += 1
-                                            
-                                            # Store minimal result
-                                            provider = self._detect_provider(row[0])
-                                            self.active_jobs[job_id]['email_results'][row[0]] = {
-                                                "email": row[0],
-                                                "category": category_code,
-                                                "provider": provider
-                                            }
-                                            
-                                            # Update results counter
-                                            self.active_jobs[job_id]['results'] = counts.copy()
-                                            
-                                            # Save updated status
-                                            self._save_job_status(job_id)
-                                            
-                                            # Yield the result
-                                            yield {
-                                                'email': row[0],
-                                                'status': category_code,
-                                                'provider': provider,
-                                                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                            }
-                    except Exception as e:
-                        logger.error(f"Error reading {category} data file: {e}")
-            
-            # Sleep to avoid high CPU usage
-            time.sleep(0.5)
-            
-            # Check job status
-            if job_id in self.active_jobs:
-                job_status = self.active_jobs[job_id]['status']
-                if job_status == 'completed' or job_status == 'failed':
-                    break
-        
-        # Final check for any missed emails
-        for email, processed in email_progress.items():
-            if not processed:
-                # Check if it's in the job results
-                if job_id in self.active_jobs and email in self.active_jobs[job_id]['email_results']:
-                    continue
-                    
-                # Check data files one last time
-                for category, category_code in category_patterns.items():
-                    data_file = os.path.join("./data", f"{category}.csv")
-                    if os.path.exists(data_file):
-                        try:
-                            with open(data_file, 'r', encoding='utf-8', newline='') as f:
-                                reader = csv.reader(f)
-                                if any(row and row[0] == email for row in reader):
-                                    # Mark email as processed
-                                    email_progress[email] = True
-                                    
-                                    # Update job status
-                                    if job_id in self.active_jobs:
-                                        if email not in self.active_jobs[job_id]['email_results']:
-                                            self.active_jobs[job_id]['verified_emails'] += 1
-                                            counts[category_code] += 1
-                                            
-                                            # Store minimal result
-                                            provider = self._detect_provider(email)
-                                            self.active_jobs[job_id]['email_results'][email] = {
-                                                "email": email,
-                                                "category": category_code,
-                                                "provider": provider
-                                            }
-                                            
-                                            # Update results counter
-                                            self.active_jobs[job_id]['results'] = counts.copy()
-                                            
-                                            # Save updated status
-                                            self._save_job_status(job_id)
-                                            
-                                            # Yield the result
-                                            yield {
-                                                'email': email,
-                                                'status': category_code,
-                                                'provider': provider,
-                                                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                            }
-                                    break
-                        except Exception as e:
-                            logger.error(f"Error reading {category} data file in final check: {e}")
-    
-    def _extract_and_process_results(self, line: str, category_patterns: Dict[str, str], 
-                                   email_progress: Dict[str, bool], job_id: str, 
-                                   counts: Dict[str, int]) -> None:
-        """
-        Extract and process email verification results from terminal output.
-        
-        Args:
-            line: Output line from terminal controller
-            category_patterns: Mapping of filename patterns to categories
-            email_progress: Tracking of which emails have been processed
-            job_id: Unique identifier for this verification job
-            counts: Counter for different result categories
-        """
-        try:
-            # Extract email address from the line
-            # Look for common patterns in the output
-            email = None
-            category = None
-            
-            # Try to extract email and category
-            for pattern, category_code in category_patterns.items():
-                if pattern in line:
-                    category = category_code
-                    # Try to extract the email from the line
-                    import re
-                    email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', line)
-                    if email_match:
-                        email = email_match.group(0)
-                        break
-            
-            # If we found both email and category
-            if email and category and email in email_progress and not email_progress[email]:
-                # Mark email as processed
-                email_progress[email] = True
-                
-                # Update job status
-                if job_id in self.active_jobs:
-                    if email not in self.active_jobs[job_id]['email_results']:
-                        self.active_jobs[job_id]['verified_emails'] += 1
-                        counts[category] += 1
-                        
-                        # Store minimal result
-                        provider = self._detect_provider(email)
-                        self.active_jobs[job_id]['email_results'][email] = {
-                            "email": email,
-                            "category": category,
-                            "provider": provider
-                        }
-                        
-                        # Update results counter
-                        self.active_jobs[job_id]['results'] = counts.copy()
-                        
-                        # Save updated status
-                        self._save_job_status(job_id)
-                        
-                        # No need to yield here, as this will be caught by the file monitoring
-        
-        except Exception as e:
-            logger.error(f"Error extracting results from line: {e}")
-    
-    def _process_terminal_results(self, job_id: str) -> None:
-        """
-        Process results from terminal controller after it completes.
-        
-        Args:
-            job_id: Unique identifier for this verification job
-        """
-        try:
-            # Get job directory
-            job_dir = os.path.join(self.results_dir, job_id)
-            
-            # Update job status
-            if job_id in self.active_jobs:
-                # Count results from the data files
-                valid_count = self._count_emails_in_file(os.path.join("./data", "Valid.csv"))
-                invalid_count = self._count_emails_in_file(os.path.join("./data", "Invalid.csv"))
-                risky_count = self._count_emails_in_file(os.path.join("./data", "Risky.csv"))
-                custom_count = self._count_emails_in_file(os.path.join("./data", "Custom.csv"))
-                
-                # Update results counts
-                self.active_jobs[job_id]['results'] = {
-                    VALID: valid_count,
-                    INVALID: invalid_count,
-                    RISKY: risky_count,
-                    CUSTOM: custom_count
-                }
-                
-                # Update verified emails count
-                self.active_jobs[job_id]['verified_emails'] = valid_count + invalid_count + risky_count + custom_count
-                
-                # Save updated status
-                self._save_job_status(job_id)
-        
-        except Exception as e:
-            logger.error(f"Error processing terminal results: {e}")
-            logger.error(traceback.format_exc())
-    
-    def _count_emails_in_file(self, file_path: str) -> int:
-        """
-        Count the number of emails in a CSV file.
-        
-        Args:
-            file_path: Path to the CSV file
-            
-        Returns:
-            int: Number of emails in the file
-        """
-        if not os.path.exists(file_path):
-            return 0
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8', newline='') as f:
-                reader = csv.reader(f)
-                return sum(1 for row in reader if row and '@' in row[0])
-        except Exception as e:
-            logger.error(f"Error counting emails in {file_path}: {e}")
-            return 0
     
     def _determine_terminal_count(self, email_count: int) -> int:
         """
@@ -576,7 +509,7 @@ class VerificationService:
         elif email_count <= 15:
             return 5
         elif email_count <= 20:
-            return 20
+            return 9
         elif email_count <= 24:
             return 11
         elif email_count <= 30:
@@ -584,11 +517,11 @@ class VerificationService:
         elif email_count <= 50:
             return 15
         elif email_count <= 200:
-            return 17
+            return 20
         elif email_count <= 500:
-            return 19
+            return 25
         else:
-            return 20  # Maximum number of terminals
+            return 30  # Maximum number of terminals
     
     def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
         """

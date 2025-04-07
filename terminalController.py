@@ -8,7 +8,7 @@ import argparse
 import random
 import datetime
 import shutil
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Set
 
 def create_directory(directory: str) -> None:
     """Create directory if it doesn't exist."""
@@ -171,7 +171,7 @@ def run_terminal(terminal_id: int, csv_path: str, output_queue: List, run_in_bac
                     f.write('1\n')  # Option 1: Load from CSV file
                     f.write(f'{abs_csv_path}\n')  # CSV path
                     f.write('y\n')  # Use multi-terminal: yes
-                    f.write('8\n')  # Number of terminals: 2
+                    f.write('20\n')  # Number of terminals: 2
                     f.write('n\n')  # Use real multiple terminals: no
                     f.write('n\n')  # Do you want to save these verification statistics? No
                     verification_name = f"TermiVerif{terminal_id}_{current_date}"
@@ -205,7 +205,7 @@ def run_terminal(terminal_id: int, csv_path: str, output_queue: List, run_in_bac
         # Start a thread to monitor the output file
         monitor_thread = threading.Thread(
             target=monitor_terminal_output,
-            args=(terminal_id, output_file, output_queue)
+            args=(terminal_id, output_file, output_queue, csv_path)
         )
         monitor_thread.daemon = True
         monitor_thread.start()
@@ -214,7 +214,7 @@ def run_terminal(terminal_id: int, csv_path: str, output_queue: List, run_in_bac
         print(f"Error in terminal {terminal_id}: {e}")
         output_queue.append((terminal_id, f"Error: {str(e)}"))
 
-def monitor_terminal_output(terminal_id: int, output_file: str, output_queue: List) -> None:
+def monitor_terminal_output(terminal_id: int, output_file: str, output_queue: List, csv_path: str) -> None:
     """
     Monitor the output file of a terminal and add new lines to the output queue.
     
@@ -222,6 +222,7 @@ def monitor_terminal_output(terminal_id: int, output_file: str, output_queue: Li
         terminal_id: ID of the terminal
         output_file: Path to the output file
         output_queue: Queue to store terminal output
+        csv_path: Path to the CSV file containing emails for this terminal
     """
     # Wait for output file to be created
     while not os.path.exists(output_file):
@@ -230,8 +231,24 @@ def monitor_terminal_output(terminal_id: int, output_file: str, output_queue: Li
     # Wait a bit to ensure file is ready for reading
     time.sleep(1)
     
+    # Get the list of emails in this terminal's CSV file
+    emails_to_verify = set()
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                email = line.strip()
+                if '@' in email:
+                    emails_to_verify.add(email)
+    except Exception as e:
+        output_queue.append((terminal_id, f"Error reading CSV file: {str(e)}"))
+    
+    # Track verified emails
+    verified_emails = set()
+    
     # Open the file and follow it
     last_position = 0
+    last_activity_time = time.time()
+    
     while True:
         try:
             with open(output_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -245,15 +262,58 @@ def monitor_terminal_output(terminal_id: int, output_file: str, output_queue: Li
                     for line in new_content.splitlines():
                         if line.strip():
                             output_queue.append((terminal_id, line.strip()))
-                
-                # Update last position
-                last_position = f.tell()
+                            
+                            # Check if this line indicates an email verification
+                            for email in emails_to_verify:
+                                if email in line and any(status in line for status in ["Valid", "Invalid", "Risky", "Custom"]):
+                                    verified_emails.add(email)
+                                    output_queue.append((terminal_id, f"Verified email: {email}"))
+                    
+                    # Update last position and activity time
+                    last_position = f.tell()
+                    last_activity_time = time.time()
             
-            # Check if terminal has completed
-            completion_marker = os.path.join(os.path.dirname(output_file), f"T{terminal_id}_completed.txt")
-            if os.path.exists(completion_marker):
+            # Check if all emails have been verified
+            if len(verified_emails) >= len(emails_to_verify):
+                output_queue.append((terminal_id, f"All {len(emails_to_verify)} emails have been verified"))
+                
+                # Create completion marker
+                completion_marker = os.path.join(os.path.dirname(output_file), f"T{terminal_id}_completed.txt")
+                with open(completion_marker, 'w') as f:
+                    f.write(f"Completed at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Verified {len(verified_emails)} of {len(emails_to_verify)} emails\n")
+                
                 output_queue.append((terminal_id, "Terminal completed processing"))
                 break
+            
+            # Check if terminal has completed based on marker file
+            completion_marker = os.path.join(os.path.dirname(output_file), f"T{terminal_id}_completed.txt")
+            if os.path.exists(completion_marker):
+                # Double check if all emails are verified by checking data files
+                data_files = [
+                    os.path.join("./data", "Valid.csv"),
+                    os.path.join("./data", "Invalid.csv"),
+                    os.path.join("./data", "Risky.csv"),
+                    os.path.join("./data", "Custom.csv")
+                ]
+                
+                for data_file in data_files:
+                    if os.path.exists(data_file):
+                        try:
+                            with open(data_file, 'r', encoding='utf-8') as f:
+                                for line in f:
+                                    if '@' in line:
+                                        email = line.strip().split(',')[0]
+                                        if email in emails_to_verify:
+                                            verified_emails.add(email)
+                        except Exception as e:
+                            output_queue.append((terminal_id, f"Error reading data file: {str(e)}"))
+                
+                # If we've verified all emails or there's been no activity for 60 seconds, break
+                if len(verified_emails) >= len(emails_to_verify) or (time.time() - last_activity_time > 60):
+                    output_queue.append((terminal_id, f"Verified {len(verified_emails)} of {len(emails_to_verify)} emails"))
+                    output_queue.append((terminal_id, "Terminal completed processing"))
+                    break
             
             # Wait before checking again
             time.sleep(0.5)
@@ -261,6 +321,19 @@ def monitor_terminal_output(terminal_id: int, output_file: str, output_queue: Li
         except Exception as e:
             # If there's an error reading the file, wait and try again
             time.sleep(1)
+            
+            # If there's been no activity for 5 minutes, break
+            if time.time() - last_activity_time > 300:
+                output_queue.append((terminal_id, f"Terminal timed out after 5 minutes of inactivity"))
+                output_queue.append((terminal_id, f"Verified {len(verified_emails)} of {len(emails_to_verify)} emails"))
+                
+                # Create completion marker
+                completion_marker = os.path.join(os.path.dirname(output_file), f"T{terminal_id}_completed.txt")
+                with open(completion_marker, 'w') as f:
+                    f.write(f"Timed out at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Verified {len(verified_emails)} of {len(emails_to_verify)} emails\n")
+                
+                break
 
 def check_completion(files_dir: str, num_terminals: int) -> bool:
     """
@@ -459,7 +532,7 @@ def main():
     # Clean up terminal files
     cleanup_terminal_files(files_dir)
     
-
+    
 if __name__ == "__main__":
     main()
 

@@ -1,5 +1,6 @@
 import os
 import json
+import csv
 import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -66,21 +67,20 @@ class StatisticsModel:
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
-        # Process each category
+        # Process each category from results files first (for accurate reasons)
         for category in [VALID, INVALID, RISKY, CUSTOM]:
-            file_path = f"./data/{category.capitalize()}.csv"
+            file_path = f"./results/{category.lower()}.csv"
             if os.path.exists(file_path):
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
-                        import csv
                         reader = csv.reader(f)
-                        next(reader, None)  # Skip header, safely handle empty files
+                        next(reader, None)  # Skip header
                         
                         for row in reader:
-                            if len(row) >= 1:  # At least has an email
+                            if len(row) >= 4:  # At least has email, provider, timestamp, reason
                                 email = row[0]
                                 provider = row[1] if len(row) > 1 else "Unknown"
-                                reason = row[3] if len(row) > 3 else "Unknown"
+                                reason = row[3] if len(row) > 3 and row[3] else "Unknown"
                                 
                                 # Update category total
                                 statistics[category]["total"] += 1
@@ -105,7 +105,46 @@ class StatisticsModel:
                                     statistics["domains"][domain]["total"] += 1
                                     statistics["domains"][domain][category] += 1
                 except Exception as e:
-                    logger.error(f"Error processing {file_path}: {e}")
+                    logger.error(f"Error processing results file {file_path}: {e}")
+        
+        # If no results found in results files, check data files as fallback
+        if sum(statistics[cat]["total"] for cat in [VALID, INVALID, RISKY, CUSTOM]) == 0:
+            for category in [VALID, INVALID, RISKY, CUSTOM]:
+                file_path = f"./data/{category.capitalize()}.csv"
+                if os.path.exists(file_path):
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            reader = csv.reader(f)
+                            
+                            for row in reader:
+                                if row and '@' in row[0]:  # Basic validation
+                                    email = row[0]
+                                    
+                                    # Update category total
+                                    statistics[category]["total"] += 1
+                                    
+                                    # Update domain statistics
+                                    if '@' in email:
+                                        _, domain = email.split('@')
+                                        if domain not in statistics["domains"]:
+                                            statistics["domains"][domain] = {
+                                                "total": 0,
+                                                "valid": 0,
+                                                "invalid": 0,
+                                                "risky": 0,
+                                                "custom": 0
+                                            }
+                                        
+                                        statistics["domains"][domain]["total"] += 1
+                                        statistics["domains"][domain][category] += 1
+                                    
+                                    # Since we don't have reason in data files, use "From data file"
+                                    reason = "From data file"
+                                    if reason not in statistics[category]["reasons"]:
+                                        statistics[category]["reasons"][reason] = 0
+                                    statistics[category]["reasons"][reason] += 1
+                    except Exception as e:
+                        logger.error(f"Error processing data file {file_path}: {e}")
         
         return statistics
     

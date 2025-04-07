@@ -3,6 +3,7 @@ import csv
 import time
 import random
 import logging
+import sys
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 
@@ -54,17 +55,42 @@ class VerificationController:
         
         # Ensure statistics directory exists
         os.makedirs("./statistics/history", exist_ok=True)
+        
+        # Check for job_id in command line arguments
+        self.job_id = self._get_job_id_from_args()
     
-    def verify_email(self, email: str) -> EmailVerificationResult:
+    def _get_job_id_from_args(self) -> Optional[str]:
+        """
+        Get job ID from command line arguments.
+        
+        Returns:
+            Optional[str]: Job ID if provided, None otherwise
+        """
+        try:
+            # Check if --job-id is in the command line arguments
+            if "--job-id" in sys.argv:
+                idx = sys.argv.index("--job-id")
+                if idx + 1 < len(sys.argv):
+                    return sys.argv[idx + 1]
+        except Exception as e:
+            logger.error(f"Error getting job ID from args: {e}")
+        
+        return None
+    
+    def verify_email(self, email: str, job_id: Optional[str] = None) -> EmailVerificationResult:
         """
         Verify an email address using the appropriate verification sequence.
         
         Args:
             email: The email address to verify
+            job_id: Optional job ID for batch verification
             
         Returns:
             EmailVerificationResult: The verification result
         """
+        # Use provided job_id or fallback to self.job_id
+        job_id = job_id or self.job_id
+        
         # Initialize verification history
         with self.lock:
             self.verification_history[email] = []
@@ -96,7 +122,7 @@ class VerificationController:
             self.add_to_history(email, f"Initial validation: {validation_result.category} - {validation_result.reason}")
             with self.lock:
                 self.result_cache[email] = validation_result
-            self.results_model.save_result(validation_result)
+            self.results_model.save_result(validation_result, job_id)
             self.save_history(email, validation_result.category)
             return validation_result
         
@@ -176,7 +202,7 @@ class VerificationController:
             if result and result.category in [VALID, INVALID]:
                 with self.lock:
                     self.result_cache[email] = result
-                self.results_model.save_result(result)
+                self.results_model.save_result(result, job_id)
                 self.save_history(email, result.category)
                 return result
             
@@ -191,7 +217,7 @@ class VerificationController:
         
         with self.lock:
             self.result_cache[email] = final_result
-        self.results_model.save_result(final_result)
+        self.results_model.save_result(final_result, job_id)
         self.save_history(email, final_result.category)
         
         return final_result
@@ -392,8 +418,9 @@ class VerificationController:
         print("5. Proxy settings")
         print("6. Screenshot settings")
         print("7. Rate limiting settings")
+        print("8. Bounce verification settings")
         
-        settings_choice = input("\nEnter your choice (1-7): ")
+        settings_choice = input("\nEnter your choice (1-8): ")
         
         if settings_choice == "1":
             # Multi-terminal settings
@@ -422,4 +449,29 @@ class VerificationController:
         elif settings_choice == "7":
             # Rate limiting settings
             self.settings_model.configure_rate_limiting_settings()
+            
+        elif settings_choice == "8":
+            # Bounce verification settings
+            self._configure_bounce_settings()
+    
+    def _configure_bounce_settings(self) -> None:
+        """Configure bounce verification settings."""
+        print("\nBounce Verification Settings:")
+        current_wait_time = self.settings_model.get("bounce_wait_time", "60")
+        
+        print(f"Current bounce wait time: {current_wait_time} seconds")
+        
+        wait_time = input("\nEnter bounce wait time in seconds (default: 60): ")
+        if wait_time:
+            try:
+                wait_time = max(10, int(wait_time))
+                self.settings_model.set("bounce_wait_time", str(wait_time), True)
+                print(f"\nBounce wait time set to {wait_time} seconds")
+            except ValueError:
+                print("\nInvalid input. Using default value of 60 seconds.")
+                self.settings_model.set("bounce_wait_time", "60", True)
+        
+        # Configure bounce results directory
+        print("\nBounce results are saved in: results/bounce_results/")
+        print("Batch-specific results are saved in: results/[BatchID]/")
 

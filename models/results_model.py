@@ -36,7 +36,7 @@ class ResultsModel:
         self.results_dir = "./results"
         os.makedirs(self.results_dir, exist_ok=True)
         
-        # Results files with all details
+        # Results files with all details - changed from *_Results.csv to *.csv
         self.results_files = {
             VALID: os.path.join(self.results_dir, "valid.csv"),
             INVALID: os.path.join(self.results_dir, "invalid.csv"),
@@ -118,116 +118,32 @@ class ResultsModel:
         if exists and existing_category != result.category:
             logger.info(f"{result.email} already exists in {existing_category} list but is now being saved as {result.category}")
         
-        # Determine where to save the result
-        if job_id:
-            # Save to job-specific results directory
-            job_dir = os.path.join(self.results_dir, job_id)
-            os.makedirs(job_dir, exist_ok=True)
+        # Set BatchID - "single" for single verification, job_id for batch
+        batch_id = job_id if job_id else "single"
+        
+        # Save to global results file
+        results_file_path = self.results_files[result.category]
+        results_exists = False
+        
+        try:
+            if os.path.exists(results_file_path):
+                with open(results_file_path, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    next(reader, None)  # Skip header
+                    results_exists = any(row and row[0] == result.email for row in reader)
+        except Exception as e:
+            logger.error(f"Error checking if email exists in {result.category} results: {e}")
+        
+        if not results_exists:
+            with open(results_file_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([result.email, result.provider, timestamp, result.reason, details_str, batch_id])
             
-            results_file_path = os.path.join(job_dir, f"{result.category}_Results.csv")
-            
-            # Check if file exists and create with header if not
-            if not os.path.exists(results_file_path):
-                with open(results_file_path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Email", "Provider", "Timestamp", "Reason", "Details", "BatchID"])
-            
-            # Check if email already exists in this file
-            results_exists = False
-            try:
-                if os.path.exists(results_file_path):
-                    with open(results_file_path, 'r', newline='', encoding='utf-8') as f:
-                        reader = csv.reader(f)
-                        next(reader, None)  # Skip header
-                        results_exists = any(row and row[0] == result.email for row in reader)
-            except Exception as e:
-                logger.error(f"Error checking if email exists in {result.category} results: {e}")
-            
-            # Save to job-specific results file
-            if not results_exists:
-                with open(results_file_path, 'a', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([result.email, result.provider, timestamp, result.reason, details_str, job_id])
-                
-                logger.info(f"Saved {result.email} to {result.category} results for job {job_id}")
-                
-                # Also update the emails_results.csv file with simplified results
-                self._update_emails_results_file(job_id, result.email, result.category, result.provider)
-        else:
-            # Save to global results file
-            results_file_path = self.results_files[result.category]
-            results_exists = False
-            
-            try:
-                if os.path.exists(results_file_path):
-                    with open(results_file_path, 'r', newline='', encoding='utf-8') as f:
-                        reader = csv.reader(f)
-                        next(reader, None)  # Skip header
-                        results_exists = any(row and row[0] == result.email for row in reader)
-            except Exception as e:
-                logger.error(f"Error checking if email exists in {result.category} results: {e}")
-            
-            if not results_exists:
-                with open(results_file_path, 'a', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([result.email, result.provider, timestamp, result.reason, details_str, ""])
-                
-                logger.info(f"Saved {result.email} to {result.category} results")
+            logger.info(f"Saved {result.email} to {result.category} results")
         
         # Only save to data file if it doesn't already exist in any category
         if not exists:
             self.add_email_to_data(result.email, result.category)
-    
-    def _update_emails_results_file(self, job_id: str, email: str, category: str, provider: str) -> None:
-        """
-        Update the emails_results.csv file with simplified results.
-        
-        Args:
-            job_id: Unique identifier for the verification job
-            email: The email address
-            category: The verification category
-            provider: The email provider
-        """
-        job_dir = os.path.join(self.results_dir, job_id)
-        results_file = os.path.join(job_dir, "emails_results.csv")
-        
-        # Create file with header if it doesn't exist
-        if not os.path.exists(results_file):
-            with open(results_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(["Email", "Status", "Provider"])
-        
-        # Check if email already exists in the file
-        exists = False
-        rows = []
-        
-        try:
-            with open(results_file, 'r', newline='', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                header = next(reader)  # Skip header
-                
-                for row in reader:
-                    if row and row[0] == email:
-                        # Update existing row
-                        rows.append([email, category, provider])
-                        exists = True
-                    else:
-                        rows.append(row)
-        except Exception as e:
-            logger.error(f"Error reading emails results file: {e}")
-        
-        # Add new row if email doesn't exist
-        if not exists:
-            rows.append([email, category, provider])
-        
-        # Write updated rows back to file
-        try:
-            with open(results_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(["Email", "Status", "Provider"])
-                writer.writerows(rows)
-        except Exception as e:
-            logger.error(f"Error writing emails results file: {e}")
     
     def add_email_to_data(self, email: str, category: str) -> bool:
         """
