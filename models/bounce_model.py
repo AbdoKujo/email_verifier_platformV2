@@ -10,10 +10,11 @@ import smtplib
 import re
 import socket
 import threading
+import queue
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import decode_header
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple, Set
 import json
 
@@ -175,7 +176,7 @@ class BounceModel:
                 # Update email status
                 self._update_email_status(email, PENDING, batch_id)
                 # Add a small delay between sends to avoid rate limiting
-                time.sleep(random.uniform(1, 3))
+                time.sleep(random.uniform(0.1, 0.3))
         
         logger.info(f"Sent {sent_count} out of {len(emails)} verification emails for batch {batch_id}")
         
@@ -194,6 +195,435 @@ class BounceModel:
                 self.result_cache[email] = results[email]
         
         return results
+    
+    # Add new methods for parallel processing and connection pooling
+
+    def batch_verify_emails_parallel(self, emails: List[str], existing_batch_id: str = None) -> Dict[str, EmailVerificationResult]:
+        """
+        Verify multiple emails using the bounce method with parallel processing.
+        
+        Args:
+            emails: List of email addresses to verify
+            existing_batch_id: Optional existing batch ID to use
+            
+        Returns:
+            Dict[str, EmailVerificationResult]: Dictionary of verification results
+        """
+        logger.info(f"Starting parallel batch bounce verification for {len(emails)} emails")
+        
+        # Check if we have SMTP accounts
+        if not self.smtp_accounts:
+            logger.warning("No SMTP accounts available for bounce verification")
+            return {email: EmailVerificationResult(
+                email=email,
+                category=RISKY,
+                reason="No SMTP accounts available for bounce verification",
+                provider="bounce"
+            ) for email in emails}
+        
+        # Determine batch ID and directory
+        if existing_batch_id:
+            batch_id = existing_batch_id
+            results_dir = os.path.join("./results", batch_id)
+        else:
+            # Generate a unique batch ID for bounce verification
+            batch_id = f"bounce_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+            results_dir = os.path.join(self.results_dir, batch_id)
+        
+        # Create the results directory if it doesn't exist
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # Create email_b.csv file
+        self._create_email_file(batch_id, emails)
+        
+        # Create initial status_b.json file
+        self._create_status_file(batch_id, emails)
+        
+        # Use threading to send emails in parallel
+        threads = []
+        results_queue = queue.Queue()
+        
+        # Determine optimal number of threads based on CPU count
+        num_threads = min(len(emails), os.cpu_count() * 2)
+        emails_per_thread = max(1, len(emails) // num_threads)
+        
+        # Split emails into chunks for each thread
+        email_chunks = []
+        for i in range(0, len(emails), emails_per_thread):
+            email_chunks.append(emails[i:i+emails_per_thread])
+        
+        # Create and start threads
+        for i, chunk in enumerate(email_chunks):
+            thread = threading.Thread(
+                target=self._send_emails_thread,
+                args=(chunk, batch_id, results_queue)
+            )
+            thread.daemon = True
+            thread.start()
+            threads.append(thread)
+        
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join()
+        
+        # Get results from queue
+        sent_count = 0
+        while not results_queue.empty():
+            result = results_queue.get()
+            if result:
+                sent_count += 1
+        
+        logger.info(f"Sent {sent_count} out of {len(emails)} verification emails for batch {batch_id}")
+        
+        # Prepare results
+        results = {}
+        for email in emails:
+            results[email] = EmailVerificationResult(
+                email=email,
+                category=RISKY,
+                reason="Verification email sent, check bounce backs later",
+                provider="bounce"
+            )
+            
+            # Update cache
+            with self.lock:
+                self.result_cache[email] = results[email]
+        
+        return results
+
+    def _send_emails_thread(self, emails: List[str], batch_id: str, results_queue: queue.Queue) -> None:
+        """
+        Thread function to send verification emails.
+        
+        Args:
+            emails: List of email addresses to verify
+            batch_id: The batch ID
+            results_queue: Queue to store results
+        """
+        # Choose a random SMTP account
+        account = random.choice(self.smtp_accounts)
+        
+        try:
+            # Connect to SMTP server once for all emails in this thread
+            smtp_server = account.get('smtp_server', '')
+            smtp_port = int(account.get('smtp_port', 587))
+            
+            # Set timeout for SMTP operations - reduced from 30 to 15 seconds
+            socket.setdefaulttimeout(15)
+            
+            with smtplib.SMTP(smtp_server, smtp_port) as server:
+                server.ehlo()
+                if smtp_port == 587:
+                    server.starttls()
+                    server.ehlo()
+                
+                # Login once
+                server.login(account.get('email', ''), account.get('password', ''))
+                
+                # Send emails
+                for email in emails:
+                    try:
+                        # Create the message
+                        msg = MIMEMultipart()
+                        msg['From'] = account.get('email', '')
+                        msg['To'] = email
+                        msg['Subject'] = ""  # Empty subject as requested
+                        
+                        # Add batch ID to headers for tracking
+                        msg['X-Batch-ID'] = batch_id
+                        msg['X-Verification-Email'] = email
+                        
+                        # Create minimal message body
+                        body = ""  # Very fast/minimal body as requested
+                        msg.attach(MIMEText(body, 'plain'))
+                        
+                        # Send email
+                        server.send_message(msg)
+                        
+                        logger.info(f"Verification email sent to {email} with batch ID {batch_id}")
+                        
+                        # Log the sent email
+                        self._log_sent_email(email, batch_id, account.get('email', ''))
+                        
+                        # Update email status
+                        self._update_email_status(email, PENDING, batch_id)
+                        
+                        # Add success to queue
+                        results_queue.put(True)
+                        
+                        # Add a small delay between sends to avoid rate limiting
+                        # Reduced from random.uniform(1, 3) to random.uniform(0.1, 0.5)
+                        time.sleep(random.uniform(0.1, 0.3))
+                        
+                    except Exception as e:
+                        logger.error(f"Error sending verification email to {email}: {e}")
+                        results_queue.put(False)
+        
+        except Exception as e:
+            logger.error(f"Error connecting to SMTP server: {e}")
+            # Mark all emails as failed
+            for _ in emails:
+                results_queue.put(False)
+
+    def process_responses_parallel(self, batch_id: str, save_results: bool = False) -> Tuple[List[str], List[str]]:
+        """
+        Process responses for a verification batch using parallel processing.
+        
+        Args:
+            batch_id: The batch ID
+            save_results: Whether to save the results (default: False)
+            
+        Returns:
+            Tuple[List[str], List[str]]: Lists of invalid and valid emails
+        """
+        # Get all emails from the batch
+        all_emails = self._get_emails_from_batch(batch_id)
+        
+        # Use threading to check for bounce backs in parallel
+        invalid_emails_set = set()
+        threads = []
+        results_lock = threading.Lock()
+        
+        # Split accounts for parallel processing
+        for account in self.smtp_accounts:
+            thread = threading.Thread(
+                target=self._check_inbox_thread,
+                args=(account, all_emails, invalid_emails_set, results_lock)
+            )
+            thread.daemon = True
+            thread.start()
+            threads.append(thread)
+        
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join()
+        
+        # Convert set to list
+        invalid_emails = list(invalid_emails_set)
+        
+        # Emails not in invalid_emails are considered valid
+        valid_emails = [email for email in all_emails if email not in invalid_emails_set]
+        
+        # Update the status file with results only if save_results is True
+        if save_results:
+            self._update_email_statuses(batch_id, invalid_emails, valid_emails)
+            self.save_bounce_results(batch_id, invalid_emails, valid_emails)
+        
+        return invalid_emails, valid_emails
+
+    def _check_inbox_thread(self, account: Dict[str, Any], all_emails: List[str], 
+                           invalid_emails_set: Set[str], results_lock: threading.Lock) -> None:
+        """
+        Thread function to check inbox for bounce backs.
+        
+        Args:
+            account: SMTP/IMAP account information
+            all_emails: List of all emails to check
+            invalid_emails_set: Shared set to store invalid emails
+            results_lock: Lock for thread safety
+        """
+        try:
+            # Connect to IMAP server
+            imap_server = account.get('imap_server', '')
+            imap_port = int(account.get('imap_port', 993))
+            
+            # Set timeout for IMAP operations - reduced from 30 to 15 seconds
+            socket.setdefaulttimeout(15)
+            
+            mail = imaplib.IMAP4_SSL(imap_server, imap_port)
+            mail.login(account.get('email', ''), account.get('password', ''))
+            mail.select('inbox')
+            
+            # Use individual search terms instead of combining them
+            # This avoids the "BAD [b'Could not parse command']" error
+            search_terms = [
+                '(FROM "MAILER-DAEMON")',
+                '(FROM "Mail Delivery System")',
+                '(FROM "postmaster")',
+                '(SUBJECT "Undeliverable")',
+                '(SUBJECT "Delivery Status Notification")',
+                '(SUBJECT "Mail Delivery Failure")',
+                '(SUBJECT "Returned mail")',
+                '(SUBJECT "Delivery Failure")',
+                '(SUBJECT "Failure Notice")'
+            ]
+            
+            # Process each search term separately
+            for search_term in search_terms:
+                try:
+                    status, messages = mail.search(None, search_term)
+                    
+                    if status == 'OK' and messages[0]:
+                        # Get all message IDs for this search term
+                        msg_ids = messages[0].split()
+                        
+                        # Process messages in batches to improve performance
+                        batch_size = 10
+                        for i in range(0, len(msg_ids), batch_size):
+                            batch_ids = msg_ids[i:i+batch_size]
+                            
+                            # Fetch multiple messages at once
+                            for msg_id in batch_ids:
+                                try:
+                                    status, msg_data = mail.fetch(msg_id, '(RFC822)')
+                                    
+                                    if status != 'OK' or not msg_data or not msg_data[0]:
+                                        continue
+                                    
+                                    raw_email = msg_data[0][1]
+                                    msg = email.message_from_bytes(raw_email)
+                                    
+                                    # Extract the body
+                                    body = ""
+                                    if msg.is_multipart():
+                                        for part in msg.walk():
+                                            content_type = part.get_content_type()
+                                            content_disposition = str(part.get("Content-Disposition"))
+                                            
+                                            if "attachment" not in content_disposition and content_type in ["text/plain", "text/html"]:
+                                                try:
+                                                    body_part = part.get_payload(decode=True)
+                                                    if body_part:
+                                                        body += body_part.decode('utf-8', errors='ignore')
+                                                except Exception as e:
+                                                    logger.error(f"Error decoding email part: {e}")
+                                    else:
+                                        try:
+                                            body_part = msg.get_payload(decode=True)
+                                            if body_part:
+                                                body += body_part.decode('utf-8', errors='ignore')
+                                        except Exception as e:
+                                            logger.error(f"Error decoding email body: {e}")
+                                    
+                                    # Convert raw_email to string for searching
+                                    raw_email_str = str(raw_email)
+                                    
+                                    # Check if any of our emails are in the bounce message
+                                    for email_to_check in all_emails:
+                                        if email_to_check in body or email_to_check in raw_email_str:
+                                            with results_lock:
+                                                invalid_emails_set.add(email_to_check)
+                                            # Mark as read
+                                            mail.store(msg_id, '+FLAGS', '\\Seen')
+                                except Exception as e:
+                                    logger.error(f"Error processing message {msg_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Error with search term '{search_term}': {e}")
+            
+            # Close connection
+            mail.close()
+            mail.logout()
+            
+        except Exception as e:
+            logger.error(f"Error checking inbox for {account.get('email', 'unknown')}: {e}")
+    
+    def _check_inbox_for_bounces(self, batch_id: str) -> Tuple[List[str], List[str]]:
+        """
+        Check inbox for bounce-back emails.
+        
+        Args:
+            batch_id: The batch ID to look for
+            
+        Returns:
+            Tuple[List[str], List[str]]: Lists of invalid and valid emails
+        """
+        # Get all emails from the batch
+        all_emails = self._get_emails_from_batch(batch_id)
+        invalid_emails = []
+        
+        for account in self.smtp_accounts:
+            try:
+                # Connect to IMAP server
+                imap_server = account.get('imap_server', '')
+                imap_port = int(account.get('imap_port', 993))
+                
+                # Set timeout for IMAP operations
+                socket.setdefaulttimeout(15)
+                
+                mail = imaplib.IMAP4_SSL(imap_server, imap_port)
+                mail.login(account.get('email', ''), account.get('password', ''))
+                mail.select('inbox')
+                
+                # Use individual search terms instead of combining them
+                search_terms = [
+                    '(FROM "MAILER-DAEMON")',
+                    '(FROM "Mail Delivery System")',
+                    '(FROM "postmaster")',
+                    '(SUBJECT "Undeliverable")',
+                    '(SUBJECT "Delivery Status Notification")',
+                    '(SUBJECT "Mail Delivery Failure")',
+                    '(SUBJECT "Returned mail")',
+                    '(SUBJECT "Delivery Failure")',
+                    '(SUBJECT "Failure Notice")'
+                ]
+                
+                # Process each search term separately
+                for search_term in search_terms:
+                    try:
+                        status, messages = mail.search(None, search_term)
+                        
+                        if status == 'OK' and messages[0]:
+                            # Get all message IDs for this search term
+                            msg_ids = messages[0].split()
+                            
+                            for msg_id in msg_ids:
+                                try:
+                                    status, msg_data = mail.fetch(msg_id, '(RFC822)')
+                                    
+                                    if status != 'OK' or not msg_data or not msg_data[0]:
+                                        continue
+                                    
+                                    raw_email = msg_data[0][1]
+                                    msg = email.message_from_bytes(raw_email)
+                                    
+                                    # Extract the body
+                                    body = ""
+                                    if msg.is_multipart():
+                                        for part in msg.walk():
+                                            content_type = part.get_content_type()
+                                            content_disposition = str(part.get("Content-Disposition"))
+                                            
+                                            if "attachment" not in content_disposition and content_type in ["text/plain", "text/html"]:
+                                                try:
+                                                    body_part = part.get_payload(decode=True)
+                                                    if body_part:
+                                                        body += body_part.decode('utf-8', errors='ignore')
+                                                except Exception as e:
+                                                    logger.error(f"Error decoding email part: {e}")
+                                    else:
+                                        try:
+                                            body_part = msg.get_payload(decode=True)
+                                            if body_part:
+                                                body += body_part.decode('utf-8', errors='ignore')
+                                        except Exception as e:
+                                            logger.error(f"Error decoding email body: {e}")
+                                    
+                                    # Convert raw_email to string for searching
+                                    raw_email_str = str(raw_email)
+                                    
+                                    # Check if any of our emails are in the bounce message
+                                    for email_to_check in all_emails:
+                                        if email_to_check in body or email_to_check in raw_email_str:
+                                            if email_to_check not in invalid_emails:
+                                                invalid_emails.append(email_to_check)
+                                            # Mark as read
+                                            mail.store(msg_id, '+FLAGS', '\\Seen')
+                                except Exception as e:
+                                    logger.error(f"Error processing message {msg_id}: {e}")
+                    except Exception as e:
+                        logger.error(f"Error with search term '{search_term}': {e}")
+                
+                # Close connection
+                mail.close()
+                mail.logout()
+                
+            except Exception as e:
+                logger.error(f"Error checking inbox for {account.get('email', 'unknown')}: {e}")
+        
+        # Emails not in invalid_emails are considered valid
+        valid_emails = [email for email in all_emails if email not in invalid_emails]
+        
+        return invalid_emails, valid_emails
     
     def _create_email_file(self, batch_id: str, emails: List[str]) -> None:
         """
@@ -322,65 +752,6 @@ class BounceModel:
             self.sent_emails[email]["status"] = status
             self.sent_emails[email]["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    def _send_verification_email(self, recipient_email: str, batch_id: str) -> bool:
-        """
-        Send a verification email to the recipient.
-        
-        Args:
-            recipient_email: The email address to verify
-            batch_id: A unique ID for this verification batch
-            
-        Returns:
-            bool: True if the email was sent successfully, False otherwise
-        """
-        # Choose a random SMTP account
-        account = random.choice(self.smtp_accounts)
-        
-        try:
-            # Create the message
-            msg = MIMEMultipart()
-            msg['From'] = account.get('email', '')
-            msg['To'] = recipient_email
-            msg['Subject'] = ""  # Empty subject as requested
-            
-            # Add batch ID to headers for tracking
-            msg['X-Batch-ID'] = batch_id
-            msg['X-Verification-Email'] = recipient_email
-            
-            # Create minimal message body
-            body = ""  # Very fast/minimal body as requested
-            msg.attach(MIMEText(body, 'plain'))
-            
-            # Connect to SMTP server
-            smtp_server = account.get('smtp_server', '')
-            smtp_port = int(account.get('smtp_port', 587))
-            
-            # Set timeout for SMTP operations
-            socket.setdefaulttimeout(30)
-            
-            with smtplib.SMTP(smtp_server, smtp_port) as server:
-                server.ehlo()
-                if smtp_port == 587:
-                    server.starttls()
-                    server.ehlo()
-                
-                # Login
-                server.login(account.get('email', ''), account.get('password', ''))
-                
-                # Send email
-                server.send_message(msg)
-                
-                logger.info(f"Verification email sent to {recipient_email} with batch ID {batch_id}")
-                
-                # Log the sent email
-                self._log_sent_email(recipient_email, batch_id, account.get('email', ''))
-                
-                return True
-                
-        except Exception as e:
-            logger.error(f"Error sending verification email to {recipient_email}: {e}")
-            return False
-    
     def _log_sent_email(self, email: str, batch_id: str, sender: str) -> None:
         """
         Log a sent email for tracking.
@@ -408,105 +779,6 @@ class BounceModel:
                 f.write(f"{timestamp},{email},{batch_id},{sender}\n")
         except Exception as e:
             logger.error(f"Error logging sent email: {e}")
-    
-    def _check_inbox_for_bounces(self, batch_id: str) -> Tuple[List[str], List[str]]:
-        """
-        Check inbox for bounce-back emails.
-        
-        Args:
-            batch_id: The batch ID to look for
-            
-        Returns:
-            Tuple[List[str], List[str]]: Lists of invalid and valid emails
-        """
-        invalid_emails = []
-        
-        # Get list of all emails in the batch
-        all_emails = self._get_emails_from_batch(batch_id)
-        
-        for account in self.smtp_accounts:
-            try:
-                # Connect to IMAP server
-                imap_server = account.get('imap_server', '')
-                imap_port = int(account.get('imap_port', 993))
-                
-                # Set timeout for IMAP operations
-                socket.setdefaulttimeout(30)
-                
-                mail = imaplib.IMAP4_SSL(imap_server, imap_port)
-                mail.login(account.get('email', ''), account.get('password', ''))
-                mail.select('inbox')
-                
-                # Search for bounce emails for each email in the batch
-                account_invalid_emails = []
-                
-                for email_to_check in all_emails:
-                    # Search directly by email address in the inbox
-                    search_terms = [
-                        f'(HEADER FROM "MAILER-DAEMON")',
-                        f'(HEADER FROM "Mail Delivery System")',
-                        f'(HEADER FROM "postmaster")',
-                        f'(HEADER SUBJECT "Undeliverable")',
-                        f'(HEADER SUBJECT "Delivery Status Notification")',
-                        f'(HEADER SUBJECT "Mail Delivery Failure")',
-                        f'(HEADER SUBJECT "Returned mail")',
-                        f'(HEADER SUBJECT "Delivery Failure")',
-                        f'(HEADER SUBJECT "Failure Notice")'
-                    ]
-                    
-                    for search_term in search_terms:
-                        status, messages = mail.search(None, search_term)
-                        
-                        if status == 'OK' and messages[0]:
-                            for msg_id in messages[0].split():
-                                status, msg_data = mail.fetch(msg_id, '(RFC822)')
-                                
-                                if status != 'OK':
-                                    continue
-                                
-                                raw_email = msg_data[0][1]
-                                msg = email.message_from_bytes(raw_email)
-                                
-                                # Extract the body
-                                body = ""
-                                if msg.is_multipart():
-                                    for part in msg.walk():
-                                        content_type = part.get_content_type()
-                                        content_disposition = str(part.get("Content-Disposition"))
-                                        
-                                        if "attachment" not in content_disposition and content_type in ["text/plain", "text/html"]:
-                                            try:
-                                                body_part = part.get_payload(decode=True).decode()
-                                                body += body_part
-                                            except:
-                                                pass
-                                else:
-                                    try:
-                                        body = msg.get_payload(decode=True).decode()
-                                    except:
-                                        pass
-                                
-                                # Check if the body contains the email we're looking for
-                                if email_to_check in body or email_to_check in str(raw_email):
-                                    account_invalid_emails.append(email_to_check)
-                                    # Mark as read
-                                    mail.store(msg_id, '+FLAGS', '\\Seen')
-                                    break  # Found a bounce for this email, move to next email
-                
-                # Add invalid emails from this account
-                invalid_emails.extend(account_invalid_emails)
-                
-                # Close connection
-                mail.close()
-                mail.logout()
-                
-            except Exception as e:
-                logger.error(f"Error checking inbox for {account.get('email', 'unknown')}: {e}")
-        
-        # Emails not in invalid_emails are considered valid
-        valid_emails = [email for email in all_emails if email not in invalid_emails]
-        
-        return invalid_emails, valid_emails
     
     def _get_emails_from_batch(self, batch_id: str) -> List[str]:
         """
@@ -577,7 +849,8 @@ class BounceModel:
             if os.path.exists(results_dir):
                 for item in os.listdir(results_dir):
                     item_path = os.path.join(results_dir, item)
-                    if os.path.isdir(item_path) and item.startswith("batch_"):
+                    # Look for batch folders (starting with "batch_")
+                    if os.path.isdir(item_path) and (item.startswith("batch_") or item.startswith("bounce_")):
                         batch_id = item
                         
                         # Get batch statistics if available
@@ -585,62 +858,60 @@ class BounceModel:
                         status_b_file = os.path.join(item_path, "status_b.json")
                         email_b_file = os.path.join(item_path, "email_b.csv")
                         
-                        # Only include if it has email_b.csv or status_b.json
-                        if not (os.path.exists(email_b_file) or os.path.exists(status_b_file)):
-                            continue
-                        
-                        created_time = ""
-                        total_emails = 0
-                        valid_count = 0
-                        invalid_count = 0
-                        risky_count = 0
-                        custom_count = 0
-                        pending_count = 0
-                        status = "Unknown"
-                        
-                        if os.path.exists(status_file):
-                            try:
-                                with open(status_file, 'r', encoding='utf-8') as f:
-                                    status_data = json.load(f)
-                                    created_time = status_data.get("start_time", "")
-                                    total_emails = status_data.get("total_emails", 0)
-                                    valid_count = status_data.get("results", {}).get("valid", 0)
-                                    invalid_count = status_data.get("results", {}).get("invalid", 0)
-                                    risky_count = status_data.get("results", {}).get("risky", 0)
-                                    custom_count = status_data.get("results", {}).get("custom", 0)
-                                    pending_count = total_emails - (valid_count + invalid_count + risky_count + custom_count)
-                            except Exception as e:
-                                logger.error(f"Error reading status file for {batch_id}: {e}")
-                        
-                        # Check if there's a bounce status file
-                        if os.path.exists(status_b_file):
-                            try:
-                                with open(status_b_file, 'r', encoding='utf-8') as f:
-                                    status_b_data = json.load(f)
-                                    if not created_time:
-                                        created_time = status_b_data.get("created", "")
-                                    if total_emails == 0:
-                                        total_emails = status_b_data.get("total_emails", 0)
-                                    valid_count = status_b_data.get("valid", 0)
-                                    invalid_count = status_b_data.get("invalid", 0)
-                                    risky_count = status_b_data.get("risky", 0)
-                                    custom_count = status_b_data.get("custom", 0)
-                                    pending_count = status_b_data.get("pending", 0)
-                                    status = status_b_data.get("status", "Pending")
-                            except Exception as e:
-                                logger.error(f"Error reading status_b file for {batch_id}: {e}")
-                        
-                        batches.append({
-                            "batch_id": batch_id,
-                            "created": created_time,
-                            "total_emails": total_emails,
-                            "valid": valid_count,
-                            "invalid": invalid_count,
-                            "risky": risky_count,
-                            "custom": custom_count,
-                            "pending": pending_count,
-                            "status": status
-                        })
+                        # Only include if it has email_b.csv or status_b.json or it's a batch_ folder
+                        if item.startswith("batch_") or os.path.exists(email_b_file) or os.path.exists(status_b_file):
+                            created_time = ""
+                            total_emails = 0
+                            valid_count = 0
+                            invalid_count = 0
+                            risky_count = 0
+                            custom_count = 0
+                            pending_count = 0
+                            status = "Unknown"
+                            
+                            if os.path.exists(status_file):
+                                try:
+                                    with open(status_file, 'r', encoding='utf-8') as f:
+                                        status_data = json.load(f)
+                                        created_time = status_data.get("start_time", "")
+                                        total_emails = status_data.get("total_emails", 0)
+                                        valid_count = status_data.get("results", {}).get("valid", 0)
+                                        invalid_count = status_data.get("results", {}).get("invalid", 0)
+                                        risky_count = status_data.get("results", {}).get("risky", 0)
+                                        custom_count = status_data.get("results", {}).get("custom", 0)
+                                        pending_count = total_emails - (valid_count + invalid_count + risky_count + custom_count)
+                                except Exception as e:
+                                    logger.error(f"Error reading status file for {batch_id}: {e}")
+                            
+                            # Check if there's a bounce status file
+                            if os.path.exists(status_b_file):
+                                try:
+                                    with open(status_b_file, 'r', encoding='utf-8') as f:
+                                        status_b_data = json.load(f)
+                                        if not created_time:
+                                            created_time = status_b_data.get("created", "")
+                                        if total_emails == 0:
+                                            total_emails = status_b_data.get("total_emails", 0)
+                                        valid_count = status_b_data.get("valid", 0)
+                                        invalid_count = status_b_data.get("invalid", 0)
+                                        risky_count = status_b_data.get("risky", 0)
+                                        custom_count = status_b_data.get("custom", 0)
+                                        pending_count = status_b_data.get("pending", 0)
+                                        status = status_b_data.get("status", "Pending")
+                                except Exception as e:
+                                    logger.error(f"Error reading status_b file for {batch_id}: {e}")
+                            
+                            batches.append({
+                                "batch_id": batch_id,
+                                "created": created_time,
+                                "total_emails": total_emails,
+                                "valid": valid_count,
+                                "invalid": invalid_count,
+                                "risky": risky_count,
+                                "custom": custom_count,
+                                "pending": pending_count,
+                                "status": status
+                            })
             
             # Also check bounce_results directory
             bounce_results_dir = os.path.join("./results", "bounce_results")
@@ -655,44 +926,42 @@ class BounceModel:
                         email_b_file = os.path.join(item_path, "email_b.csv")
                         
                         # Only include if it has email_b.csv or status_b.json
-                        if not (os.path.exists(email_b_file) or os.path.exists(status_b_file)):
-                            continue
-                        
-                        created_time = ""
-                        total_emails = 0
-                        valid_count = 0
-                        invalid_count = 0
-                        risky_count = 0
-                        custom_count = 0
-                        pending_count = 0
-                        status = "Unknown"
-                        
-                        if os.path.exists(status_b_file):
-                            try:
-                                with open(status_b_file, 'r', encoding='utf-8') as f:
-                                    status_b_data = json.load(f)
-                                    created_time = status_b_data.get("created", "")
-                                    total_emails = status_b_data.get("total_emails", 0)
-                                    valid_count = status_b_data.get("valid", 0)
-                                    invalid_count = status_b_data.get("invalid", 0)
-                                    risky_count = status_b_data.get("risky", 0)
-                                    custom_count = status_b_data.get("custom", 0)
-                                    pending_count = status_b_data.get("pending", 0)
-                                    status = status_b_data.get("status", "Pending")
-                            except Exception as e:
-                                logger.error(f"Error reading status_b file for {batch_id}: {e}")
-                        
-                        batches.append({
-                            "batch_id": batch_id,
-                            "created": created_time,
-                            "total_emails": total_emails,
-                            "valid": valid_count,
-                            "invalid": invalid_count,
-                            "risky": risky_count,
-                            "custom": custom_count,
-                            "pending": pending_count,
-                            "status": status
-                        })
+                        if os.path.exists(email_b_file) or os.path.exists(status_b_file):
+                            created_time = ""
+                            total_emails = 0
+                            valid_count = 0
+                            invalid_count = 0
+                            risky_count = 0
+                            custom_count = 0
+                            pending_count = 0
+                            status = "Unknown"
+                            
+                            if os.path.exists(status_b_file):
+                                try:
+                                    with open(status_b_file, 'r', encoding='utf-8') as f:
+                                        status_b_data = json.load(f)
+                                        created_time = status_b_data.get("created", "")
+                                        total_emails = status_b_data.get("total_emails", 0)
+                                        valid_count = status_b_data.get("valid", 0)
+                                        invalid_count = status_b_data.get("invalid", 0)
+                                        risky_count = status_b_data.get("risky", 0)
+                                        custom_count = status_b_data.get("custom", 0)
+                                        pending_count = status_b_data.get("pending", 0)
+                                        status = status_b_data.get("status", "Pending")
+                                except Exception as e:
+                                    logger.error(f"Error reading status_b file for {batch_id}: {e}")
+                            
+                            batches.append({
+                                "batch_id": batch_id,
+                                "created": created_time,
+                                "total_emails": total_emails,
+                                "valid": valid_count,
+                                "invalid": invalid_count,
+                                "risky": risky_count,
+                                "custom": custom_count,
+                                "pending": pending_count,
+                                "status": status
+                            })
         except Exception as e:
             logger.error(f"Error getting batch information: {e}")
         
@@ -742,8 +1011,6 @@ class BounceModel:
         if not os.path.exists(file_path):
             logger.error(f"Email file {file_path} not found")
             return
-        
-       
         
         # Read the current email file
         rows = []
@@ -913,19 +1180,48 @@ class BounceModel:
             else:
                 # Update existing status data
                 status_data["status"] = "checked"
-                status_data["valid"] = len(valid_emails)
-                status_data["invalid"] = len(invalid_emails)
-                status_data["risky"] = len(risky_emails)
-                status_data["pending"] = len(risky_emails)
                 status_data["checking_attempts"] = status_data.get("checking_attempts", 0) + 1
                 status_data["last_checked"] = now
                 
                 if "first_checked" not in status_data:
                     status_data["first_checked"] = now
                 
-                status_data["valid_list"] = valid_emails
-                status_data["invalid_list"] = invalid_emails
-                status_data["risky_list"] = risky_emails
+                # Update lists based on checking attempts and time elapsed
+                checking_attempts = status_data.get("checking_attempts", 0)
+                first_checked_str = status_data.get("first_checked", "")
+                
+                # Parse first checked time
+                first_checked_time = None
+                if first_checked_str:
+                    try:
+                        first_checked_time = datetime.strptime(first_checked_str, "%Y-%m-%d %H:%M:%S")
+                    except Exception as e:
+                        logger.error(f"Error parsing first_checked time: {e}")
+                
+                # Calculate time elapsed since first check
+                time_elapsed = None
+                if first_checked_time:
+                    time_elapsed = datetime.now() - first_checked_time
+                
+                # Update lists based on checking attempts and time elapsed
+                if checking_attempts >= 3 or (time_elapsed and time_elapsed > timedelta(hours=24)):
+                    # Third try or more than 24 hours: emails without bounce backs are valid
+                    status_data["valid"] = len(valid_emails)
+                    status_data["invalid"] = len(invalid_emails)
+                    status_data["risky"] = 0
+                    status_data["pending"] = 0
+                    status_data["valid_list"] = valid_emails
+                    status_data["invalid_list"] = invalid_emails
+                    status_data["risky_list"] = []
+                else:
+                    # First or second try: emails with bounce backs are invalid, others stay risky
+                    status_data["valid"] = 0
+                    status_data["invalid"] = len(invalid_emails)
+                    status_data["risky"] = len(risky_emails)
+                    status_data["pending"] = len(risky_emails)
+                    status_data["valid_list"] = []
+                    status_data["invalid_list"] = invalid_emails
+                    status_data["risky_list"] = risky_emails
             
             # Save status data
             with open(status_file, 'w', encoding='utf-8') as f:

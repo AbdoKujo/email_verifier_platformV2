@@ -196,7 +196,8 @@ def bounce_verification_menu(bounce_model, controller):
                 print(f"\nSending verification emails to {len(emails)} emails...")
                 
                 # Send verification emails without waiting for bounce backs
-                results = bounce_model.batch_verify_emails(emails)
+                # Use parallel processing for better performance
+                results = bounce_model.batch_verify_emails_parallel(emails)
                 
                 print(f"\nVerification emails sent. You can check for bounce backs later using option 4 (Check for bounce back)")
                 
@@ -221,7 +222,8 @@ def bounce_verification_menu(bounce_model, controller):
                     print(f"\nSending verification emails to {len(emails)} emails...")
                     
                     # Send verification emails without waiting for bounce backs
-                    results = bounce_model.batch_verify_emails(emails)
+                    # Use parallel processing for better performance
+                    results = bounce_model.batch_verify_emails_parallel(emails)
                     
                     print(f"\nVerification emails sent. You can check for bounce backs later using option 4 (Check for bounce back)")
                     
@@ -268,7 +270,8 @@ def bounce_verification_menu(bounce_model, controller):
                                 print(f"\nSending verification emails to {len(risky_emails)} risky emails...")
                                 
                                 # Send verification emails using the existing batch ID
-                                results = bounce_model.batch_verify_emails(risky_emails, batch_id)
+                                # Use parallel processing for better performance
+                                results = bounce_model.batch_verify_emails_parallel(risky_emails, batch_id)
                                 
                                 print(f"\nVerification emails sent. You can check for bounce backs later using option 4 (Check for bounce back)")
                             else:
@@ -301,7 +304,8 @@ def bounce_verification_menu(bounce_model, controller):
                                         print(f"\nSending verification emails to {len(invalid_emails)} invalid emails...")
                                         
                                         # Send verification emails using the existing batch ID
-                                        results = bounce_model.batch_verify_emails(invalid_emails, batch_id)
+                                        # Use parallel processing for better performance
+                                        results = bounce_model.batch_verify_emails_parallel(invalid_emails, batch_id)
                                         
                                         print(f"\nVerification emails sent. You can check for bounce backs later using option 4 (Check for bounce back)")
                                     else:
@@ -352,7 +356,8 @@ def bounce_verification_menu(bounce_model, controller):
                 print(f"\nSending verification emails to {len(risky_emails)} risky emails...")
                 
                 # Send verification emails without waiting for bounce backs
-                results = bounce_model.batch_verify_emails(risky_emails)
+                # Use parallel processing for better performance
+                results = bounce_model.batch_verify_emails_parallel(risky_emails)
                 
                 print(f"\nVerification emails sent. You can check for bounce backs later using option 4 (Check for bounce back)")
             else:
@@ -391,7 +396,8 @@ def bounce_verification_menu(bounce_model, controller):
                         print(f"\nSending verification emails to {len(invalid_emails)} invalid emails...")
                         
                         # Send verification emails without waiting for bounce backs
-                        results = bounce_model.batch_verify_emails(invalid_emails)
+                        # Use parallel processing for better performance
+                        results = bounce_model.batch_verify_emails_parallel(invalid_emails)
                         
                         print(f"\nVerification emails sent. You can check for bounce backs later using option 4 (Check for bounce back)")
                     else:
@@ -406,55 +412,7 @@ def bounce_verification_menu(bounce_model, controller):
             print("\nCheck for bounce back:")
             
             # Get all bounce batches
-            batches = []
-            
-            # Check results directory for batch folders with email_b.csv or status_b.json
-            results_dir = "./results"
-            if os.path.exists(results_dir):
-                for item in os.listdir(results_dir):
-                    item_path = os.path.join(results_dir, item)
-                    if os.path.isdir(item_path):
-                        email_b_file = os.path.join(item_path, "email_b.csv")
-                        status_b_file = os.path.join(item_path, "status_b.json")
-                        if os.path.exists(email_b_file) or os.path.exists(status_b_file):
-                            # Get status if available
-                            status = "Unknown"
-                            if os.path.exists(status_b_file):
-                                try:
-                                    with open(status_b_file, 'r', encoding='utf-8') as f:
-                                        status_data = json.load(f)
-                                        status = status_data.get("status", "Unknown")
-                                except Exception:
-                                    pass
-                            
-                            batches.append({
-                                "batch_id": item,
-                                "status": status
-                            })
-            
-            # Check bounce_results directory
-            bounce_results_dir = os.path.join("./results/bounce_results")
-            if os.path.exists(bounce_results_dir):
-                for item in os.listdir(bounce_results_dir):
-                    item_path = os.path.join(bounce_results_dir, item)
-                    if os.path.isdir(item_path):
-                        email_b_file = os.path.join(item_path, "email_b.csv")
-                        status_b_file = os.path.join(item_path, "status_b.json")
-                        if os.path.exists(email_b_file) or os.path.exists(status_b_file):
-                            # Get status if available
-                            status = "Unknown"
-                            if os.path.exists(status_b_file):
-                                try:
-                                    with open(status_b_file, 'r', encoding='utf-8') as f:
-                                        status_data = json.load(f)
-                                        status = status_data.get("status", "Unknown")
-                                except Exception:
-                                    pass
-                            
-                            batches.append({
-                                "batch_id": item,
-                                "status": status
-                            })
+            batches = bounce_model.get_all_batches()
             
             if not batches:
                 print("\nNo bounce verification batches found.")
@@ -480,7 +438,8 @@ def bounce_verification_menu(bounce_model, controller):
                         continue
                     
                     print(f"\nChecking bounce backs for batch {batch_id}...")
-                    invalid_emails, valid_emails = bounce_model.process_responses(batch_id, save_results=False)
+                    # Use parallel processing for faster bounce checking
+                    invalid_emails, valid_emails = bounce_model.process_responses_parallel(batch_id, save_results=False)
                     
                     print(f"\nResults for batch {batch_id}:")
                     print(f"Valid emails: {len(valid_emails)}")
@@ -494,7 +453,7 @@ def bounce_verification_menu(bounce_model, controller):
                     save_results = input("\nDo you want to save these results? (y/n): ")
                     if save_results.lower() == 'y':
                         # Process again with save_results=True
-                        bounce_model.process_responses(batch_id, save_results=True)
+                        bounce_model.process_responses_parallel(batch_id, save_results=True)
                         print("\nResults saved successfully.")
                     else:
                         print("\nResults not saved.")
