@@ -551,7 +551,19 @@ example3@example.com"></textarea>
                                         // This is a status update
                                         const statusDiv = document.createElement('div');
                                         statusDiv.className = 'stream-result';
-                                        statusDiv.innerHTML = `<strong>Status:</strong> ${result.status} - ${result.message || ''}`;
+                                        
+                                        // Add batch ID to status updates if available
+                                        let statusContent = '';
+                                        if (result.job_id) {
+                                            statusContent = `<strong>Batch ID:</strong> ${result.job_id} - `;
+                                        }
+                                        statusContent += `<strong>Status:</strong> ${result.status}`;
+                                        
+                                        if (result.message) {
+                                            statusContent += ` - ${result.message}`;
+                                        }
+                                        
+                                        statusDiv.innerHTML = statusContent;
                                         
                                         // Add to the response body
                                         responseBodyElem.appendChild(statusDiv);

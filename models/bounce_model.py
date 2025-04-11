@@ -448,6 +448,12 @@ class BounceModel:
                 '(SUBJECT "Failure Notice")'
             ]
             
+            search_terms += [
+                '(FROM "Microsoft Outlook")',
+                '(SUBJECT "Échec de la remise")',
+                '(SUBJECT "Delivery Failed")',
+            ]
+            
             # Process each search term separately
             for search_term in search_terms:
                 try:
@@ -1222,7 +1228,10 @@ class BounceModel:
                     status_data["valid_list"] = []
                     status_data["invalid_list"] = invalid_emails
                     status_data["risky_list"] = risky_emails
-            
+                
+                # Log the current status after update
+                logger.info(f"Results for batch {batch_id}: Valid emails: {status_data['valid']}, Invalid emails: {status_data['invalid']}, Risky emails: {status_data['risky']}")
+
             # Save status data
             with open(status_file, 'w', encoding='utf-8') as f:
                 json.dump(status_data, f, indent=4)
@@ -1262,4 +1271,3 @@ class BounceModel:
         except Exception as e:
             logger.error(f"Error getting emails for batch {batch_id} and category {category}: {e}")
             return []
-

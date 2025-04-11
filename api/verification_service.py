@@ -153,8 +153,9 @@ class VerificationService:
         # Save initial status
         self._save_job_status(job_id)
         
-        # Yield initial status
+        # Yield initial status with batch ID as header
         yield {
+            'header': f"Batch ID: {job_id}",
             'job_id': job_id,
             'status': 'started',
             'total_emails': len(emails),
@@ -205,9 +206,10 @@ class VerificationService:
                 # Check data files for new results
                 new_results = self._check_data_files_for_results(emails, verified_emails, job_id)
                 
-                # Yield any new results
+                # Add header to result before yielding
                 for result in new_results:
                     verified_emails.add(result['email'])
+                    result['header'] = f"Batch ID: {job_id}"
                     yield result
                 
                 # Update activity tracking
@@ -224,8 +226,9 @@ class VerificationService:
                 logger.warning(f"Marking {len(remaining_emails)} unverified emails as risky for job {job_id}")
                 
                 for email in remaining_emails:
-                    # Create a risky result for this email
+                    # Add header to result before yielding
                     result = {
+                        'header': f"Batch ID: {job_id}",
                         'email': email,
                         'status': RISKY,
                         'provider': self._detect_provider(email),
@@ -261,6 +264,7 @@ class VerificationService:
             
             # Yield final status
             yield {
+                'header': f"Batch ID: {job_id}",
                 'job_id': job_id,
                 'status': 'completed',
                 'total_emails': len(emails),
@@ -283,6 +287,7 @@ class VerificationService:
             
             # Yield error status
             yield {
+                'header': f"Batch ID: {job_id}",
                 'job_id': job_id,
                 'status': 'failed',
                 'error': str(e),
@@ -604,4 +609,3 @@ class VerificationService:
             'timestamp': result.timestamp,
             'details': result.details
         }
-
