@@ -209,3 +209,79 @@ class ResultsService:
         
         return results
 
+    def get_bounce_results(self) -> Dict[str, Any]:
+        """
+        Get all bounce verification results.
+        
+        Returns:
+            Dict[str, Any]: All bounce verification results
+        """
+        bounce_results = {}
+        
+        try:
+            # Check bounce_results directory
+            bounce_results_dir = os.path.join(self.results_dir, "bounce_results")
+            if os.path.exists(bounce_results_dir):
+                for item in os.listdir(bounce_results_dir):
+                    item_path = os.path.join(bounce_results_dir, item)
+                    if os.path.isdir(item_path) and item.startswith("bounce_"):
+                        batch_id = item
+                        
+                        # Get batch status
+                        status_file = os.path.join(item_path, "status_b.json")
+                        if os.path.exists(status_file):
+                            try:
+                                with open(status_file, 'r', encoding='utf-8') as f:
+                                    status_data = json.load(f)
+                                    bounce_results[batch_id] = status_data
+                            except Exception as e:
+                                logger.error(f"Error reading status file for {batch_id}: {e}")
+            
+            # Also check main results directory for bounce verifications
+            if os.path.exists(self.results_dir):
+                for item in os.listdir(self.results_dir):
+                    item_path = os.path.join(self.results_dir, item)
+                    if os.path.isdir(item_path):
+                        status_b_file = os.path.join(item_path, "status_b.json")
+                        if os.path.exists(status_b_file):
+                            try:
+                                with open(status_b_file, 'r', encoding='utf-8') as f:
+                                    status_data = json.load(f)
+                                    bounce_results[item] = status_data
+                            except Exception as e:
+                                logger.error(f"Error reading status file for {item}: {e}")
+        
+        except Exception as e:
+            logger.error(f"Error getting bounce results: {e}")
+        
+        return bounce_results
+    
+    def get_bounce_batch_results(self, batch_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get bounce verification results for a specific batch.
+        
+        Args:
+            batch_id: The batch ID
+            
+        Returns:
+            Optional[Dict[str, Any]]: The batch results, or None if not found
+        """
+        # Check in main results directory
+        status_file = os.path.join(self.results_dir, batch_id, "status_b.json")
+        if os.path.exists(status_file):
+            try:
+                with open(status_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Error reading status file for {batch_id}: {e}")
+        
+        # Check in bounce_results directory
+        bounce_status_file = os.path.join(self.results_dir, "bounce_results", batch_id, "status_b.json")
+        if os.path.exists(bounce_status_file):
+            try:
+                with open(bounce_status_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Error reading status file for {batch_id}: {e}")
+        
+        return None

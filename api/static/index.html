@@ -202,6 +202,76 @@
     <div id="verification-tab" class="tab-content active">
         <h2>Verification Endpoints</h2>
         
+        <!-- Add Bounce Verification Section -->
+        <div class="endpoint">
+            <h3>Verify Emails (Bounce Method)</h3>
+            <p><span class="method">POST:</span><span class="url">/api/verify/bounce</span></p>
+            
+            <div class="input-tabs">
+                <span class="input-tab active" data-input="bounce-json">JSON</span>
+                <span class="input-tab" data-input="bounce-plain">Plain Text (One Email Per Line)</span>
+            </div>
+            
+            <!-- JSON input section -->
+            <div class="input-content active" id="bounce-json-input">
+                <div class="request-body">
+                    <p>Request Body (JSON):</p>
+                    <textarea id="bounce-emails-body">{
+  "emails": [
+    "example1@example.com",
+    "example2@example.com",
+    "example3@example.com"
+  ]
+}</textarea>
+                </div>
+            </div>
+            
+            <!-- Plain text input section -->
+            <div class="input-content" id="bounce-plain-input">
+                <div class="request-body">
+                    <p>Enter emails (one per line):</p>
+                    <textarea id="bounce-emails-plain" placeholder="example1@example.com
+example2@example.com
+example3@example.com"></textarea>
+                </div>
+            </div>
+            
+            <button id="test-bounce-emails">Test Bounce Verification</button>
+            <div class="response" id="bounce-emails-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="bounce-emails-response-body"></div>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <h3>Check Bounce Verification Status</h3>
+            <p><span class="method">GET:</span><span class="url">/api/verify/bounce/status/{batch_id}</span></p>
+            <div class="request-body">
+                <p>Batch ID:</p>
+                <input type="text" id="bounce-batch-id" style="width: 100%; padding: 8px; margin-bottom: 10px;" placeholder="Enter batch ID">
+            </div>
+            <button id="test-bounce-status">Check Status</button>
+            <div class="response" id="bounce-status-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="bounce-status-response-body"></div>
+            </div>
+        </div>
+        
+        <div class="endpoint">
+            <h3>Process Bounce Responses</h3>
+            <p><span class="method">POST:</span><span class="url">/api/verify/bounce/process/{batch_id}</span></p>
+            <div class="request-body">
+                <p>Batch ID:</p>
+                <input type="text" id="bounce-process-id" style="width: 100%; padding: 8px; margin-bottom: 10px;" placeholder="Enter batch ID">
+            </div>
+            <button id="test-bounce-process">Process Responses</button>
+            <div class="response" id="bounce-process-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="bounce-process-response-body"></div>
+            </div>
+        </div>
+        
+        <!-- Existing single email verification section -->
         <div class="endpoint">
             <h3>Verify a Single Email</h3>
             <p><span class="method">POST:</span><span class="url">/api/verify/email</span></p>
@@ -826,6 +896,121 @@ example3@example.com"></textarea>
                     });
                 });
             }
+
+            // Bounce verification
+            document.getElementById('test-bounce-emails').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('bounce-emails-response');
+                const responseBodyElem = document.getElementById('bounce-emails-response-body');
+                
+                try {
+                    // Check which input type is active
+                    const jsonInputActive = document.getElementById('bounce-json-input').classList.contains('active');
+                    let body;
+                    
+                    if (jsonInputActive) {
+                        // Use the JSON input directly
+                        body = document.getElementById('bounce-emails-body').value;
+                    } else {
+                        // Convert plain text emails to JSON format
+                        const plainEmails = document.getElementById('bounce-emails-plain').value;
+                        const emailList = plainEmails.split('\n')
+                            .map(email => email.trim())
+                            .filter(email => email); // Filter out empty lines
+                            
+                        body = JSON.stringify({ emails: emailList });
+                    }
+                    
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/verify/bounce`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                    
+                    // If batch_id is returned, update the batch ID fields
+                    if (data.batch_id) {
+                        document.getElementById('bounce-batch-id').value = data.batch_id;
+                        document.getElementById('bounce-process-id').value = data.batch_id;
+                    }
+                    
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Check bounce verification status
+            document.getElementById('test-bounce-status').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('bounce-status-response');
+                const responseBodyElem = document.getElementById('bounce-status-response-body');
+                
+                try {
+                    const batchId = document.getElementById('bounce-batch-id').value;
+                    if (!batchId) {
+                        throw new Error('Batch ID is required');
+                    }
+                    
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/verify/bounce/status/${batchId}`, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Process bounce responses
+            document.getElementById('test-bounce-process').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('bounce-process-response');
+                const responseBodyElem = document.getElementById('bounce-process-response-body');
+                
+                try {
+                    const batchId = document.getElementById('bounce-process-id').value;
+                    if (!batchId) {
+                        throw new Error('Batch ID is required');
+                    }
+                    
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/verify/bounce/process/${batchId}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+
+            // Input tab navigation for batch emails
         });
     </script>
 </body>

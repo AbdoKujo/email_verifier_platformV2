@@ -8,6 +8,7 @@ import argparse
 import random
 import datetime
 import shutil
+import platform
 from typing import List, Dict, Any, Set
 
 def create_directory(directory: str) -> None:
@@ -117,7 +118,7 @@ def divide_emails(csv_path: str, num_terminals: int) -> List[str]:
 
 def run_terminal(terminal_id: int, csv_path: str, output_queue: List, run_in_background: bool = False, max_retries: int = 3, job_id: str = None) -> None:
     """
-    Run main.py in a cmd terminal with automated input.
+    Run main.py with automated input.
     
     Args:
         terminal_id: ID of the terminal
@@ -141,25 +142,6 @@ def run_terminal(terminal_id: int, csv_path: str, output_queue: List, run_in_bac
         # Create output file for capturing terminal output
         output_file = os.path.join(files_dir, f"terminal_output_{terminal_id}.txt")
         
-        # Create a batch file to run the command with input redirection
-        batch_file = os.path.join(files_dir, f"terminal_cmd_{terminal_id}.bat")
-        with open(batch_file, 'w') as f:
-            f.write('@echo off\n')
-            f.write(f'title Email Verifier Terminal {terminal_id}\n')
-            f.write(f'cd /d "{os.getcwd()}"\n')
-            f.write(f'echo Terminal {terminal_id} starting... > "{output_file}"\n')
-            # Redirect stdout and stderr to the output file
-            cmd_args = f'python main.py < "{files_dir}\\terminal_input_{terminal_id}.txt"'
-            if job_id:
-                cmd_args += f' --job-id "{job_id}"'
-            f.write(f'{cmd_args} >> "{output_file}" 2>&1\n')
-            f.write(f'echo Terminal {terminal_id} completed. >> "{output_file}"\n')
-            f.write(f'echo Completed > "{files_dir}\\T{terminal_id}_completed.txt"\n')
-            if not run_in_background:
-                f.write('pause\n')
-            else:
-                f.write('exit\n')
-        
         # Create input file with automated responses
         input_file = os.path.join(files_dir, f"terminal_input_{terminal_id}.txt")
         
@@ -171,7 +153,7 @@ def run_terminal(terminal_id: int, csv_path: str, output_queue: List, run_in_bac
                     f.write('1\n')  # Option 1: Load from CSV file
                     f.write(f'{abs_csv_path}\n')  # CSV path
                     f.write('y\n')  # Use multi-terminal: yes
-                    f.write('20\n')  # Number of terminals: 2
+                    f.write('20\n')  # Number of terminals: 20
                     f.write('n\n')  # Use real multiple terminals: no
                     f.write('n\n')  # Do you want to save these verification statistics? No
                     verification_name = f"TermiVerif{terminal_id}_{current_date}"
@@ -186,17 +168,71 @@ def run_terminal(terminal_id: int, csv_path: str, output_queue: List, run_in_bac
                 else:
                     raise e
         
-        # Start cmd process with the batch file
-        if run_in_background:
-            # Use /B flag to run the process in the background without a window
-            process = subprocess.Popen(
-                f'start /B cmd /c "{batch_file}"',
-                shell=True
-            )
+        # Detect operating system
+        is_windows = platform.system() == "Windows"
+        
+        if is_windows:
+            # Windows-specific approach using batch files
+            batch_file = os.path.join(files_dir, f"terminal_cmd_{terminal_id}.bat")
+            with open(batch_file, 'w') as f:
+                f.write('@echo off\n')
+                f.write(f'title Email Verifier Terminal {terminal_id}\n')
+                f.write(f'cd /d "{os.getcwd()}"\n')
+                f.write(f'echo Terminal {terminal_id} starting... > "{output_file}"\n')
+                # Redirect stdout and stderr to the output file
+                cmd_args = f'python main.py < "{files_dir}\\terminal_input_{terminal_id}.txt"'
+                if job_id:
+                    cmd_args += f' --job-id "{job_id}"'
+                f.write(f'{cmd_args} >> "{output_file}" 2>&1\n')
+                f.write(f'echo Terminal {terminal_id} completed. >> "{output_file}"\n')
+                f.write(f'echo Completed > "{files_dir}\\T{terminal_id}_completed.txt"\n')
+                if not run_in_background:
+                    f.write('pause\n')
+                else:
+                    f.write('exit\n')
+            
+            # Start cmd process with the batch file
+            if run_in_background:
+                # Use /B flag to run the process in the background without a window
+                process = subprocess.Popen(
+                    f'start /B cmd /c "{batch_file}"',
+                    shell=True
+                )
+            else:
+                process = subprocess.Popen(
+                    ["start", "cmd", "/k", f"{batch_file}"],
+                    shell=True
+                )
         else:
+            # Linux/Docker approach using direct Python execution
+            with open(output_file, 'w') as f:
+                f.write(f"Terminal {terminal_id} starting...\n")
+            
+            # Build command
+            cmd = ["python", "main.py"]
+            if job_id:
+                cmd.extend(["--job-id", job_id])
+            
+            # Create a shell script to run the command with input redirection
+            shell_script = os.path.join(files_dir, f"terminal_cmd_{terminal_id}.sh")
+            with open(shell_script, 'w') as f:
+                f.write("#!/bin/bash\n")
+                f.write(f"cd {os.getcwd()}\n")
+                f.write(f"cat {input_file} | python main.py")
+                if job_id:
+                    f.write(f" --job-id \"{job_id}\"")
+                f.write(f" >> {output_file} 2>&1\n")
+                f.write(f"echo 'Terminal {terminal_id} completed.' >> {output_file}\n")
+                f.write(f"echo 'Completed' > {files_dir}/T{terminal_id}_completed.txt\n")
+            
+            # Make the shell script executable
+            os.chmod(shell_script, 0o755)
+            
+            # Run the shell script
             process = subprocess.Popen(
-                ["start", "cmd", "/k", f"{batch_file}"],
-                shell=True
+                ["/bin/bash", shell_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
             )
         
         # Add initial message to output queue
@@ -532,7 +568,42 @@ def main():
     # Clean up terminal files
     cleanup_terminal_files(files_dir)
     
-    
+    # If job_id is provided, copy results to job directory
+    if job_id:
+        job_dir = os.path.join("./results", job_id)
+        
+        # Copy results files from data directory to job directory
+        for category in ["Valid", "Invalid", "Risky", "Custom"]:
+            source_file = os.path.join("./data", f"{category}.csv")
+            dest_file = os.path.join(job_dir, f"{category.lower()}.csv")
+            
+            if os.path.exists(source_file):
+                try:
+                    # Read source file
+                    with open(source_file, 'r', newline='', encoding='utf-8') as f:
+                        reader = csv.reader(f)
+                        rows = list(reader)
+                    
+                    # Write to destination file with headers
+                    with open(dest_file, 'w', newline='', encoding='utf-8') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["Email", "Provider", "Timestamp", "Reason", "Details", "BatchID"])
+                        
+                        # Add rows with minimal information
+                        for row in rows:
+                            if row and '@' in row[0]:  # Basic validation
+                                writer.writerow([
+                                    row[0],  # Email
+                                    "unknown",  # Provider
+                                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp
+                                    f"Verified by batch job {job_id}",  # Reason
+                                    "",  # Details
+                                    job_id  # BatchID
+                                ])
+                    
+                    print(f"Copied {category} results to job directory")
+                except Exception as e:
+                    print(f"Error copying {category} results: {e}")
+
 if __name__ == "__main__":
     main()
-

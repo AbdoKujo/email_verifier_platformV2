@@ -15,6 +15,8 @@ from api.verification_service import VerificationService
 from api.results_service import ResultsService
 from api.statistics_service import StatisticsService
 from api.settings_service import SettingsService
+# Import BounceService
+from api.bounce_service import BounceService
 
 # Create Flask app
 app = Flask(__name__)
@@ -25,6 +27,8 @@ verification_service = VerificationService()
 results_service = ResultsService()
 statistics_service = StatisticsService()
 settings_service = SettingsService()
+# Initialize BounceService
+bounce_service = BounceService()
 
 # Serve HTML Tester
 @app.route('/')
@@ -61,10 +65,6 @@ def verify_batch():
     emails = data['emails']
     job_id = data.get('job_id', f"batch_{int(time.time())}_{uuid.uuid4().hex[:8]}")
     
-    def getJobId():
-        """Get the job ID for the batch verification."""
-        return job_id    
-    
     # Use streaming response to provide real-time updates
     def generate():
         for result in verification_service.verify_batch_emails_stream(emails, job_id):
@@ -85,6 +85,36 @@ def verify_status(job_id):
     else:
         return jsonify({'error': 'Job not found'}), 404
 
+# Bounce verification endpoints
+@app.route('/api/verify/bounce', methods=['POST'])
+def verify_bounce():
+    """Verify emails using the bounce method."""
+    data = request.get_json()
+    
+    if not data or 'emails' not in data:
+        return jsonify({'error': 'Emails list is required'}), 400
+    
+    emails = data['emails']
+    existing_batch_id = data.get('batch_id')
+    
+    result = bounce_service.initiate_bounce_verification(emails, existing_batch_id)
+    
+    return jsonify(result)
+
+@app.route('/api/verify/bounce/status/<batch_id>', methods=['GET'])
+def bounce_status(batch_id):
+    """Get bounce verification status."""
+    status = bounce_service.check_bounce_verification(batch_id)
+    
+    return jsonify(status)
+
+@app.route('/api/verify/bounce/process/<batch_id>', methods=['POST'])
+def process_bounce(batch_id):
+    """Process bounce responses for a verification batch."""
+    result = bounce_service.process_bounce_responses(batch_id)
+    
+    return jsonify(result)
+
 # Results endpoints
 @app.route('/api/results', methods=['GET'])
 def get_all_results():
@@ -101,6 +131,23 @@ def get_job_results(job_id):
         return jsonify(results)
     else:
         return jsonify({'error': 'Job not found'}), 404
+
+@app.route('/api/results/bounce', methods=['GET'])
+def get_bounce_results():
+    """Get all bounce verification results."""
+    results = results_service.get_bounce_results()
+    
+    return jsonify(results)
+
+@app.route('/api/results/bounce/<batch_id>', methods=['GET'])
+def get_bounce_batch_results(batch_id):
+    """Get bounce verification results for a specific batch."""
+    results = results_service.get_bounce_batch_results(batch_id)
+    
+    if results:
+        return jsonify(results)
+    else:
+        return jsonify({'error': 'Batch not found'}), 404
 
 # Statistics endpoints
 @app.route('/api/statistics', methods=['GET'])
@@ -161,9 +208,7 @@ def update_settings():
     else:
         return jsonify(result), 400
 
-
 if __name__ == '__main__':
     # Create static directory if it doesn't exist
     os.makedirs(os.path.join(os.path.dirname(__file__), 'static'), exist_ok=True)
     app.run(debug=True, host='0.0.0.0', port=5000)
-
