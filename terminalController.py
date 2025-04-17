@@ -569,41 +569,6 @@ def main():
     cleanup_terminal_files(files_dir)
     
     # If job_id is provided, copy results to job directory
-    if job_id:
-        job_dir = os.path.join("./results", job_id)
-        
-        # Copy results files from data directory to job directory
-        for category in ["Valid", "Invalid", "Risky", "Custom"]:
-            source_file = os.path.join("./data", f"{category}.csv")
-            dest_file = os.path.join(job_dir, f"{category.lower()}.csv")
-            
-            if os.path.exists(source_file):
-                try:
-                    # Read source file
-                    with open(source_file, 'r', newline='', encoding='utf-8') as f:
-                        reader = csv.reader(f)
-                        rows = list(reader)
-                    
-                    # Write to destination file with headers
-                    with open(dest_file, 'w', newline='', encoding='utf-8') as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["Email", "Provider", "Timestamp", "Reason", "Details", "BatchID"])
-                        
-                        # Add rows with minimal information
-                        for row in rows:
-                            if row and '@' in row[0]:  # Basic validation
-                                writer.writerow([
-                                    row[0],  # Email
-                                    "unknown",  # Provider
-                                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp
-                                    f"Verified by batch job {job_id}",  # Reason
-                                    "",  # Details
-                                    job_id  # BatchID
-                                ])
-                    
-                    print(f"Copied {category} results to job directory")
-                except Exception as e:
-                    print(f"Error copying {category} results: {e}")
 
 if __name__ == "__main__":
     main()

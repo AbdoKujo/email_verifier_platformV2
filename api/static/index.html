@@ -183,6 +183,25 @@
         .input-content.active {
             display: block;
         }
+
+        /* Add this to your existing CSS styles */
+        .request-info {
+            margin-bottom: 15px;
+            padding: 10px;
+            background-color: #f0f8ff;
+            border: 1px solid #b8daff;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        
+        .request-info pre {
+            background-color: #f5f5f5;
+            padding: 8px;
+            overflow: auto;
+            margin: 5px 0;
+            border-radius: 3px;
+            max-height: 150px;
+        }
     </style>
 </head>
 <body>
@@ -348,6 +367,42 @@ example3@example.com"></textarea>
         <h2>Results Endpoints</h2>
         
         <div class="endpoint">
+            <h3>Get All Batch IDs</h3>
+            <p><span class="method">GET:</span><span class="url">/api/results/batches</span></p>
+            <button id="test-batch-ids">Get Batch IDs</button>
+            <div class="response" id="batch-ids-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="batch-ids-response-body"></div>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <h3>Get All Batch Names</h3>
+            <p><span class="method">GET:</span><span class="url">/api/batches</span></p>
+            <button id="test-batch-names">Get Batch Names</button>
+            <div class="response" id="batch-names-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="batch-names-response-body"></div>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <h3>Update Batch Name</h3>
+            <p><span class="method">PUT:</span><span class="url">/api/batches/{batch_id}/name</span></p>
+            <div class="request-body">
+                <p>Batch ID:</p>
+                <input type="text" id="update-batch-id" style="width: 100%; padding: 8px; margin-bottom: 10px;" placeholder="Enter batch ID">
+                <p>New Name:</p>
+                <input type="text" id="update-batch-name" style="width: 100%; padding: 8px; margin-bottom: 10px;" placeholder="Enter new batch name">
+            </div>
+            <button id="test-update-batch-name">Update Name</button>
+            <div class="response" id="update-batch-name-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="update-batch-name-response-body"></div>
+            </div>
+        </div>
+
+        <div class="endpoint">
             <h3>Get All Results</h3>
             <p><span class="method">GET:</span><span class="url">/api/results</span></p>
             <button id="test-all-results">Test Endpoint</button>
@@ -417,6 +472,16 @@ example3@example.com"></textarea>
                 <div class="response-body" id="category-history-response-body"></div>
             </div>
         </div>
+
+        <div class="endpoint">
+            <h3>Get Category Statistics</h3>
+            <p><span class="method">GET:</span><span class="url">/api/statistics/category</span></p>
+            <button id="test-category-stats">Test Endpoint</button>
+            <div class="response" id="category-stats-response" style="display: none;">
+                <p class="response-header">Response:</p>
+                <div class="response-body" id="category-stats-response-body"></div>
+            </div>
+        </div>
     </div>
     
     <div id="settings-tab" class="tab-content">
@@ -478,9 +543,29 @@ example3@example.com"></textarea>
                 }
             }
             
-            // Helper function to show response
-            function showResponse(responseElem, responseBodyElem, data, isStream = false) {
+            // Helper function to show response with request information
+            function showResponse(responseElem, responseBodyElem, data, isStream = false, requestInfo = null) {
                 responseElem.style.display = 'block';
+                
+                // Create or update the request info section
+                let requestInfoElem = responseElem.querySelector('.request-info');
+                if (!requestInfoElem && requestInfo) {
+                    requestInfoElem = document.createElement('div');
+                    requestInfoElem.className = 'request-info';
+                    responseElem.insertBefore(requestInfoElem, responseElem.firstChild);
+                }
+                
+                if (requestInfo && requestInfoElem) {
+                    requestInfoElem.innerHTML = `
+                        <h4>Request Details:</h4>
+                        <p><strong>URL:</strong> ${requestInfo.url}</p>
+                        <p><strong>Method:</strong> ${requestInfo.method}</p>
+                        ${requestInfo.body ? `<p><strong>Body:</strong></p><pre>${formatJSON(requestInfo.body)}</pre>` : ''}
+                    `;
+                    requestInfoElem.style.display = 'block';
+                } else if (requestInfoElem) {
+                    requestInfoElem.style.display = 'none';
+                }
                 
                 if (isStream) {
                     responseBodyElem.innerHTML = '';
@@ -527,8 +612,9 @@ example3@example.com"></textarea>
                 try {
                     const body = document.getElementById('single-email-body').value;
                     const apiUrl = getApiUrl();
+                    const url = `${apiUrl}/api/verify/email`;
                     
-                    const response = await fetch(`${apiUrl}/api/verify/email`, {
+                    const response = await fetch(url, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
@@ -536,8 +622,15 @@ example3@example.com"></textarea>
                         body
                     });
                     
+                    // Create request info object
+                    const requestInfo = {
+                        url: url,
+                        method: 'POST',
+                        body: body
+                    };
+                    
                     const data = await response.json();
-                    showResponse(responseElem, responseBodyElem, data);
+                    showResponse(responseElem, responseBodyElem, data, false, requestInfo);
                 } catch (error) {
                     showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
                 } finally {
@@ -545,16 +638,13 @@ example3@example.com"></textarea>
                 }
             });
             
-            // Verify batch of emails
+            // Verify batch of emails - displaying raw response
             document.getElementById('test-batch-emails').addEventListener('click', async function() {
                 const button = this;
                 const loading = addLoadingIndicator(button);
                 
                 const responseElem = document.getElementById('batch-emails-response');
                 const responseBodyElem = document.getElementById('batch-emails-response-body');
-                
-                // Clear the response body and show it
-                showResponse(responseElem, responseBodyElem, '', true);
                 
                 try {
                     // Check which input type is active
@@ -575,9 +665,20 @@ example3@example.com"></textarea>
                     }
                     
                     const apiUrl = getApiUrl();
+                    const url = `${apiUrl}/api/verify/batch`;
+                    
+                    // Create request info object
+                    const requestInfo = {
+                        url: url,
+                        method: 'POST',
+                        body: body
+                    };
+                    
+                    // Show initial response with request info but empty stream content
+                    showResponse(responseElem, responseBodyElem, '', true, requestInfo);
                     
                     // Create a fetch request with streaming response
-                    const response = await fetch(`${apiUrl}/api/verify/batch`, {
+                    const response = await fetch(url, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
@@ -589,68 +690,45 @@ example3@example.com"></textarea>
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
                     
+                    // Create a container for raw response
+                    const rawResponseContainer = document.createElement('div');
+                    rawResponseContainer.className = 'raw-response-container';
+                    responseBodyElem.appendChild(rawResponseContainer);
+                    
+                    // Container for pretty-formatted JSON
+                    const jsonContainer = document.createElement('pre');
+                    jsonContainer.style.whiteSpace = 'pre-wrap';
+                    jsonContainer.style.wordBreak = 'break-word';
+                    responseBodyElem.appendChild(jsonContainer);
+                    
                     // Process the stream
+                    let rawResponse = '';
                     while (true) {
                         const { value, done } = await reader.read();
                         if (done) break;
                         
                         // Decode the chunk
                         const chunk = decoder.decode(value, { stream: true });
+                        rawResponse += chunk;
                         
-                        // Process each line separately
-                        const lines = chunk.split('\n');
-                        for (const line of lines) {
-                            if (line.trim()) {
-                                try {
-                                    const result = JSON.parse(line);
-                                    
-                                    // Check if this is a status update or a result
-                                    if (result.email) {
-                                        // This is a result for a specific email
-                                        const status = result.status.toLowerCase();
-                                        const statusClass = `stream-${status}`;
-                                        
-                                        // Create a div for this result
-                                        const resultDiv = document.createElement('div');
-                                        resultDiv.className = `stream-result ${statusClass}`;
-                                        resultDiv.innerHTML = `📧 ${result.email}: <strong>${status.toUpperCase()}</strong> (${result.provider})`;
-                                        
-                                        // Add to the response body
-                                        responseBodyElem.appendChild(resultDiv);
-                                    } else {
-                                        // This is a status update
-                                        const statusDiv = document.createElement('div');
-                                        statusDiv.className = 'stream-result';
-                                        
-                                        // Add batch ID to status updates if available
-                                        let statusContent = '';
-                                        if (result.job_id) {
-                                            statusContent = `<strong>Batch ID:</strong> ${result.job_id} - `;
-                                        }
-                                        statusContent += `<strong>Status:</strong> ${result.status}`;
-                                        
-                                        if (result.message) {
-                                            statusContent += ` - ${result.message}`;
-                                        }
-                                        
-                                        statusDiv.innerHTML = statusContent;
-                                        
-                                        // Add to the response body
-                                        responseBodyElem.appendChild(statusDiv);
-                                        
-                                        // If this is a completed status, update the job ID field
-                                        if (result.job_id && (result.status === 'completed' || result.status === 'started')) {
-                                            document.getElementById('job-id').value = result.job_id;
-                                            document.getElementById('results-job-id').value = result.job_id;
-                                        }
+                        // Update the display with the raw response
+                        jsonContainer.textContent = rawResponse;
+                        
+                        // If we have a job_id in the response, update the input fields
+                        try {
+                            // Look for job_id in any of the lines
+                            const lines = rawResponse.split('\n');
+                            for (const line of lines) {
+                                if (line.includes('job_id')) {
+                                    const data = JSON.parse(line);
+                                    if (data.job_id && (data.status === 'started' || data.status === 'completed')) {
+                                        document.getElementById('job-id').value = data.job_id;
+                                        document.getElementById('results-job-id').value = data.job_id;
                                     }
-                                    
-                                    // Scroll to the bottom
-                                    responseBodyElem.scrollTop = responseBodyElem.scrollHeight;
-                                } catch (e) {
-                                    console.error('Error parsing JSON:', e);
                                 }
                             }
+                        } catch (e) {
+                            // Ignore parsing errors while the response is incomplete
                         }
                     }
                 } catch (error) {
@@ -785,13 +863,20 @@ example3@example.com"></textarea>
                     }
                     
                     const apiUrl = getApiUrl();
+                    const url = `${apiUrl}/api/statistics/history/email?email=${encodeURIComponent(email)}`;
                     
-                    const response = await fetch(`${apiUrl}/api/statistics/history/email?email=${encodeURIComponent(email)}`, {
+                    const response = await fetch(url, {
                         method: 'GET'
                     });
                     
+                    // Create request info object with query parameters
+                    const requestInfo = {
+                        url: url,
+                        method: 'GET'
+                    };
+                    
                     const data = await response.json();
-                    showResponse(responseElem, responseBodyElem, data);
+                    showResponse(responseElem, responseBodyElem, data, false, requestInfo);
                 } catch (error) {
                     showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
                 } finally {
@@ -1010,7 +1095,172 @@ example3@example.com"></textarea>
                 }
             });
 
-            // Input tab navigation for batch emails
+            // Get all batch IDs
+            document.getElementById('test-batch-ids').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('batch-ids-response');
+                const responseBodyElem = document.getElementById('batch-ids-response-body');
+                
+                try {
+                    const apiUrl = getApiUrl();
+                    
+                    const response = await fetch(`${apiUrl}/api/results/batches`, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                    
+                    // If batch IDs are returned, populate any batch ID fields with the first one
+                    if (data.batch_ids && data.batch_ids.length > 0) {
+                        // Populate job ID fields
+                        document.getElementById('job-id').value = data.batch_ids[0];
+                        document.getElementById('results-job-id').value = data.batch_ids[0];
+                        
+                        // Also populate bounce batch ID fields if they exist
+                        if (document.getElementById('bounce-batch-id')) {
+                            document.getElementById('bounce-batch-id').value = data.batch_ids[0];
+                        }
+                        if (document.getElementById('bounce-process-id')) {
+                            document.getElementById('bounce-process-id').value = data.batch_ids[0];
+                        }
+                    }
+                    
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+
+            // Get category statistics
+            document.getElementById('test-category-stats').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('category-stats-response');
+                const responseBodyElem = document.getElementById('category-stats-response-body');
+                
+                try {
+                    const apiUrl = getApiUrl();
+                    const url = `${apiUrl}/api/statistics/category`;
+                    
+                    const response = await fetch(url, {
+                        method: 'GET'
+                    });
+                    
+                    // Create request info object
+                    const requestInfo = {
+                        url: url,
+                        method: 'GET'
+                    };
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data, false, requestInfo);
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+
+            // Get all batch names
+            document.getElementById('test-batch-names').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('batch-names-response');
+                const responseBodyElem = document.getElementById('batch-names-response-body');
+                
+                try {
+                    const apiUrl = getApiUrl();
+                    const url = `${apiUrl}/api/batches`;
+                    
+                    const response = await fetch(url, {
+                        method: 'GET'
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data);
+                    
+                    // If batches are returned, populate the batch ID fields with the first one
+                    if (data.batches && Object.keys(data.batches).length > 0) {
+                        const firstBatchId = Object.keys(data.batches)[0];
+                        document.getElementById('update-batch-id').value = firstBatchId;
+                        
+                        // Also populate other batch ID fields if they exist
+                        if (document.getElementById('job-id')) {
+                            document.getElementById('job-id').value = firstBatchId;
+                        }
+                        if (document.getElementById('results-job-id')) {
+                            document.getElementById('results-job-id').value = firstBatchId;
+                        }
+                        if (document.getElementById('bounce-batch-id')) {
+                            document.getElementById('bounce-batch-id').value = firstBatchId;
+                        }
+                        if (document.getElementById('bounce-process-id')) {
+                            document.getElementById('bounce-process-id').value = firstBatchId;
+                        }
+                    }
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
+            
+            // Update batch name
+            document.getElementById('test-update-batch-name').addEventListener('click', async function() {
+                const button = this;
+                const loading = addLoadingIndicator(button);
+                
+                const responseElem = document.getElementById('update-batch-name-response');
+                const responseBodyElem = document.getElementById('update-batch-name-response-body');
+                
+                try {
+                    const batchId = document.getElementById('update-batch-id').value;
+                    if (!batchId) {
+                        throw new Error('Batch ID is required');
+                    }
+                    
+                    const batchName = document.getElementById('update-batch-name').value;
+                    if (!batchName) {
+                        throw new Error('Batch name is required');
+                    }
+                    
+                    const apiUrl = getApiUrl();
+                    const url = `${apiUrl}/api/batches/${batchId}/name`;
+                    const body = JSON.stringify({ name: batchName });
+                    
+                    const requestInfo = {
+                        url: url,
+                        method: 'PUT',
+                        body: body
+                    };
+                    
+                    const response = await fetch(url, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: body
+                    });
+                    
+                    const data = await response.json();
+                    showResponse(responseElem, responseBodyElem, data, false, requestInfo);
+                    
+                    // Refresh the batch names list if successful
+                    if (data.success && document.getElementById('test-batch-names')) {
+                        document.getElementById('test-batch-names').click();
+                    }
+                } catch (error) {
+                    showResponse(responseElem, responseBodyElem, `Error: ${error.message}`);
+                } finally {
+                    removeLoadingIndicator(button, loading);
+                }
+            });
         });
     </script>
 </body>

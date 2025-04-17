@@ -221,7 +221,7 @@ class ResultsService:
         try:
             # Check bounce_results directory
             bounce_results_dir = os.path.join(self.results_dir, "bounce_results")
-            if os.path.exists(bounce_results_dir):
+            if (os.path.exists(bounce_results_dir)):
                 for item in os.listdir(bounce_results_dir):
                     item_path = os.path.join(bounce_results_dir, item)
                     if os.path.isdir(item_path) and item.startswith("bounce_"):
@@ -285,3 +285,146 @@ class ResultsService:
                 logger.error(f"Error reading status file for {batch_id}: {e}")
         
         return None
+
+    def get_batch_ids(self) -> List[str]:
+        """
+        Get all available batch IDs from the results directory.
+        
+        Returns:
+            List[str]: List of batch IDs (folder names) in the results directory
+        """
+        batch_ids = []
+        
+        try:
+            # Check if results directory exists
+            if os.path.exists(self.results_dir):
+                for item in os.listdir(self.results_dir):
+                    item_path = os.path.join(self.results_dir, item)
+                    
+                    # Check if it's a directory and follows batch naming pattern
+                    if os.path.isdir(item_path) and (
+                        item.startswith("job_") or 
+                        item.startswith("batch_")
+                    ):
+                        # Verify it's a valid batch by checking for status file
+                        status_file = os.path.join(item_path, "status.json")
+                        
+                        if os.path.exists(status_file):
+                            batch_ids.append(item)
+        
+        except Exception as e:
+            logger.error(f"Error getting batch IDs: {e}")
+        
+        return batch_ids
+
+    def set_batch_name(self, batch_id: str, batch_name: str) -> bool:
+        """
+        Set a custom name for a batch by adding it to the job_id.txt file.
+        The batch name will be added as a second line in the file.
+        
+        Args:
+            batch_id: The batch ID
+            batch_name: The name to set for the batch
+            
+        Returns:
+            bool: True if the name was set successfully, False otherwise
+        """
+        try:
+            batch_dir = os.path.join(self.results_dir, batch_id)
+            job_id_file = os.path.join(batch_dir, "job_id.txt")
+            
+            if not os.path.exists(batch_dir):
+                logger.error(f"Batch directory not found: {batch_id}")
+                return False
+                
+            # Read existing content
+            content = []
+            if os.path.exists(job_id_file):
+                with open(job_id_file, 'r', encoding='utf-8') as f:
+                    content = f.read().splitlines()
+            
+            # Ensure the file has at least one line (the batch ID)
+            if not content:
+                content.append(batch_id)
+            
+            # Set or update the batch name as the second line
+            if len(content) > 1:
+                content[1] = batch_name
+            else:
+                content.append(batch_name)
+            
+            # Write back the content
+            with open(job_id_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(content))
+            
+            logger.info(f"Set batch name '{batch_name}' for batch {batch_id}")
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error setting batch name for {batch_id}: {e}")
+            return False
+    
+    def get_batch_name(self, batch_id: str) -> Optional[str]:
+        """
+        Get the custom name of a batch from the job_id.txt file.
+        Returns the second line of the file if available.
+        
+        Args:
+            batch_id: The batch ID
+            
+        Returns:
+            Optional[str]: The batch name if available, None otherwise
+        """
+        try:
+            job_id_file = os.path.join(self.results_dir, batch_id, "job_id.txt")
+            
+            if not os.path.exists(job_id_file):
+                return None
+            
+            with open(job_id_file, 'r', encoding='utf-8') as f:
+                lines = f.read().splitlines()
+                
+                # Return the second line if available
+                if len(lines) > 1:
+                    return lines[1]
+            
+            # If there's no second line, return None
+            return None
+        
+        except Exception as e:
+            logger.error(f"Error getting batch name for {batch_id}: {e}")
+            return None
+
+    def delete_batch(self, batch_id: str) -> bool:
+        """
+        Delete a batch folder by its batch ID.
+        
+        Args:
+            batch_id: The batch ID to delete
+            
+        Returns:
+            bool: True if the batch was successfully deleted, False otherwise
+        """
+        try:
+            batch_dir = os.path.join(self.results_dir, batch_id)
+            
+            # Check if the directory exists
+            if not os.path.exists(batch_dir):
+                logger.error(f"Batch directory not found: {batch_id}")
+                return False
+            
+            # Check if it's a valid batch directory pattern for safety
+            if not (batch_id.startswith("batch_") or batch_id.startswith("job_")):
+                logger.error(f"Invalid batch ID pattern: {batch_id}")
+                return False
+            
+            # Remove the directory and all its contents
+            import shutil
+            shutil.rmtree(batch_dir)
+            
+            logger.info(f"Successfully deleted batch: {batch_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting batch {batch_id}: {e}")
+            return False

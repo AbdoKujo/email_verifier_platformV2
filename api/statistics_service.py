@@ -12,6 +12,9 @@ from models.statistics_model import StatisticsModel
 from models.settings_model import SettingsModel
 from models.common import VALID, INVALID, RISKY, CUSTOM
 
+# Define TOTAL constant if not already defined in models.common
+TOTAL = "total"
+
 logger = logging.getLogger(__name__)
 
 class StatisticsService:
@@ -46,9 +49,9 @@ class StatisticsService:
                     VALID: statistics.get(VALID, {}).get('total', 0),
                     INVALID: statistics.get(INVALID, {}).get('total', 0),
                     RISKY: statistics.get(RISKY, {}).get('total', 0),
-                    CUSTOM: statistics.get(CUSTOM, {}).get('total', 0)
+                    TOTAL: sum(statistics.get(cat, {}).get('total', 0) for cat in [VALID, INVALID, RISKY]),
                 },
-                'total_emails': sum(statistics.get(cat, {}).get('total', 0) for cat in [VALID, INVALID, RISKY, CUSTOM]),
+                'total_emails': sum(statistics.get(cat, {}).get('total', 0) for cat in [VALID, INVALID, RISKY]),
                 'domains': statistics.get('domains', {}),
                 'reasons': {
                     VALID: statistics.get(VALID, {}).get('reasons', {}),
@@ -71,6 +74,18 @@ class StatisticsService:
                 'domains': {},
                 'reasons': {}
             }
+            
+    def get_category_count(self) -> Dict[str, Any]:
+        statistics = self.statistics_model.get_statistics()
+        return{
+            'timestamp': statistics.get('timestamp', ''),
+                'categories': {
+                    VALID: statistics.get(VALID, {}).get('total', 0),
+                    INVALID: statistics.get(INVALID, {}).get('total', 0),
+                    RISKY: statistics.get(RISKY, {}).get('total', 0),
+                    TOTAL: sum(statistics.get(cat, {}).get('total', 0) for cat in [VALID, INVALID, RISKY]),
+                },
+        }  
     
     def get_email_history(self, email: str) -> Optional[Dict[str, Any]]:
         """

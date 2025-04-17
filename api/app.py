@@ -6,6 +6,7 @@ import json
 import uuid
 import time
 from datetime import datetime
+import threading
 
 # Add parent directory to path to import models
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -149,11 +150,85 @@ def get_bounce_batch_results(batch_id):
     else:
         return jsonify({'error': 'Batch not found'}), 404
 
+@app.route('/api/batches', methods=['GET'])
+def get_all_batch_names():
+    """
+    Get all available batch IDs and their names.
+    
+    Returns:
+        Dict[str, str]: Dictionary mapping batch IDs to their names
+    """
+    batch_ids = results_service.get_batch_ids()
+    
+    # Create dictionary of batch_id -> batch_name
+    batch_names = {}
+    for batch_id in batch_ids:
+        # Get the batch name, or use the batch ID as fallback if no name is set
+        name = results_service.get_batch_name(batch_id) or batch_id
+        batch_names[batch_id] = name
+    
+    return jsonify({"batches": batch_names})
+
+@app.route('/api/batches/<batch_id>/name', methods=['PUT'])
+def update_batch_name(batch_id):
+    """
+    Update the name for a specific batch.
+    
+    Args:
+        batch_id: The batch ID to update
+        
+    Returns:
+        JSON response with success or error
+    """
+    data = request.get_json()
+    
+    if not data or 'name' not in data:
+        return jsonify({'error': 'Batch name is required in request body'}), 400
+    
+    batch_name = data['name']
+    
+    # Initialize the results service and set the batch name
+    result = results_service.set_batch_name(batch_id, batch_name)
+    
+    if result:
+        return jsonify({'success': True, 'message': f'Batch name updated to "{batch_name}"'})
+    else:
+        return jsonify({'error': 'Failed to update batch name, batch may not exist'}), 404
+
+@app.route('/api/batches/<batch_id>', methods=['DELETE'])
+def delete_batch(batch_id):
+    """
+    Delete a specific batch folder by ID.
+    
+    Args:
+        batch_id: The batch ID to delete
+        
+    Returns:
+        JSON response with success or error
+    """
+    result = results_service.delete_batch(batch_id)
+    
+    if result:
+        return jsonify({
+            'success': True, 
+            'message': f'Batch {batch_id} has been permanently deleted'
+        })
+    else:
+        return jsonify({
+            'error': 'Failed to delete batch, batch may not exist or another error occurred'
+        }), 404
+
 # Statistics endpoints
 @app.route('/api/statistics', methods=['GET'])
 def get_global_statistics():
     """Get global verification statistics."""
     statistics = statistics_service.get_global_statistics()
+    return jsonify(statistics)
+
+@app.route('/api/statistics/category', methods=['GET'])
+def get_category_statistics():
+    """Get global verification statistics."""
+    statistics = statistics_service.get_category_count()
     return jsonify(statistics)
 
 @app.route('/api/statistics/history/email', methods=['GET'])
@@ -211,4 +286,4 @@ def update_settings():
 if __name__ == '__main__':
     # Create static directory if it doesn't exist
     os.makedirs(os.path.join(os.path.dirname(__file__), 'static'), exist_ok=True)
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)

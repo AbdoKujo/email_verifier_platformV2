@@ -97,9 +97,9 @@ class VerificationService:
                 elif any(x in mx_record for x in ['yahoo']):
                     return 'yahoo'
                 else:
-                    return 'other'
+                    return domain
             except:
-                return 'other'
+                return domain
 
     def get_job_id(self) -> str:
         """
@@ -155,7 +155,6 @@ class VerificationService:
         
         # Yield initial status with batch ID as header
         yield {
-            'header': f"Batch ID: {job_id}",
             'job_id': job_id,
             'status': 'started',
             'total_emails': len(emails),
@@ -209,7 +208,6 @@ class VerificationService:
                 # Add header to result before yielding
                 for result in new_results:
                     verified_emails.add(result['email'])
-                    result['header'] = f"Batch ID: {job_id}"
                     yield result
                 
                 # Update activity tracking
@@ -228,7 +226,6 @@ class VerificationService:
                 for email in remaining_emails:
                     # Add header to result before yielding
                     result = {
-                        'header': f"Batch ID: {job_id}",
                         'email': email,
                         'status': RISKY,
                         'provider': self._detect_provider(email),
@@ -264,13 +261,11 @@ class VerificationService:
             
             # Yield final status
             yield {
-                'header': f"Batch ID: {job_id}",
                 'job_id': job_id,
                 'status': 'completed',
                 'total_emails': len(emails),
                 'verified_emails': len(verified_emails),
                 'results': self.active_jobs[job_id]['results'] if job_id in self.active_jobs else {},
-                'message': 'Batch verification completed',
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             
@@ -287,7 +282,6 @@ class VerificationService:
             
             # Yield error status
             yield {
-                'header': f"Batch ID: {job_id}",
                 'job_id': job_id,
                 'status': 'failed',
                 'error': str(e),
@@ -325,14 +319,12 @@ class VerificationService:
                                 provider = self._detect_provider(email)
                                 
                                 # Try to get reason from results file
-                                reason = self._get_reason_from_results(email, category_code)
                                 
                                 result = {
                                     'email': email,
-                                    'status': category_code,
+                                    'category': category_code,
                                     'provider': provider,
                                     'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    'reason': reason
                                 }
                                 
                                 # Update job status
