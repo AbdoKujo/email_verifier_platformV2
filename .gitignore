@@ -11,6 +11,16 @@
 # Don't ignore specific files
 !main.*
 !terminalController.*
+!Dockerfile
+!docker-compose.yml
+!run-docker.ps1
+!run.sh
+!requirements.txt
+!start_api.sh
+!.dockerignore
+build_and_run.sh
+!LICENSE
+!README.md
 
 # Don't ignore HTML and JS files
 !*.html

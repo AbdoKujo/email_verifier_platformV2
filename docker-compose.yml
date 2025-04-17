@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  email-verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: email-verifier
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./screenshots:/app/screenshots
+      - ./results:/app/results
+      - ./terminal:/app/terminal
+    environment:
+      - SMTP_HOST=smtp.example.com
+      - SMTP_PORT=587
+      - SMTP_USERNAME=your_username
+      - SMTP_PASSWORD=your_password
+      - SMTP_FROM=your_email@example.com
+      - PYTHONUNBUFFERED=1
+    # No default command - will use the entrypoint script
